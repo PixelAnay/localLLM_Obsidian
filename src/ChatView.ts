@@ -102,6 +102,9 @@ export class ChatView extends ItemView {
   async onOpen(): Promise<void> {
     this.buildUI();
     await this.checkConnection();
+
+    // Register callback so ToolExecutor can open notes in tabs
+    this.plugin.toolExecutor.onOpenNotes = (paths: string[]) => this.openNotes(paths);
   }
 
   async onClose(): Promise<void> {
@@ -520,6 +523,10 @@ export class ChatView extends ItemView {
 
     if (msg.content) {
       renderMarkdownCompat(this.app, msg.content, contentEl, this);
+      // Make vault note paths in AI responses clickable
+      if (msg.role === 'assistant') {
+        this.makeNoteLinksClickable(contentEl);
+      }
     }
 
     // Streaming cursor
@@ -569,6 +576,199 @@ export class ChatView extends ItemView {
   }
 
   // ── Actions ────────────────────────────────────────────────────────────────
+
+  /**
+   * Open one or more vault notes in new editor tabs.
+   * The first note gets focus; additional notes open as background tabs.
+   */
+  private async openNotes(paths: string[]): Promise<void> {
+    const { workspace } = this.app;
+    for (let i = 0; i < paths.length; i++) {
+      const leaf = workspace.getLeaf('tab');
+      const file = this.resolveNoteFile(paths[i]);
+      if (file) {
+        await leaf.openFile(file as any, { active: i === 0 });
+      }
+    }
+  }
+
+  private resolveNoteFile(rawPath: string): any | null {
+    const candidates = new Set<string>();
+    const trimmed = (rawPath ?? '').trim();
+    if (!trimmed) return null;
+
+    const addCandidate = (value: string): void => {
+      const v = value.trim();
+      if (!v) return;
+      candidates.add(v);
+      candidates.add(v.normalize('NFC'));
+      candidates.add(v.normalize('NFD'));
+    };
+
+    addCandidate(trimmed.replace(/\\/g, '/'));
+    addCandidate(trimmed.replace(/[“”]/g, '"').replace(/[‘’]/g, "'"));
+    addCandidate(trimmed.replace(/[\]\[(){}<>'"`.,;:!?]+$/g, ''));
+
+    try {
+      addCandidate(decodeURIComponent(trimmed));
+    } catch {
+      // Ignore malformed URI input.
+    }
+
+    for (const candidate of candidates) {
+      const file = this.app.vault.getAbstractFileByPath(candidate);
+      if (file) return file;
+    }
+
+    // Fallback: normalize and compare against vault markdown files.
+    const toKey = (value: string) =>
+      value
+        .replace(/\\/g, '/')
+        .normalize('NFC')
+        .toLowerCase();
+
+    const candidateKeys = new Set(Array.from(candidates).map(toKey));
+    const toSuperLooseKey = (value: string) =>
+      value.normalize('NFC').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    const files = this.app.vault.getMarkdownFiles();
+    
+    for (const f of files) {
+      if (candidateKeys.has(toKey(f.path))) return f;
+    }
+
+    // Fuzzy suffix/path matching for slight formatting differences in model output.
+    for (const candidate of candidates) {
+      const cKey = toKey(candidate);
+      const cLoose = toSuperLooseKey(candidate);
+      for (const f of files) {
+        const fKey = toKey(f.path);
+        const fLoose = toSuperLooseKey(f.path);
+        if (fKey.endsWith(cKey) || cKey.endsWith(fKey)) return f;
+        if (fLoose.endsWith(cLoose) || cLoose.endsWith(fLoose)) return f;
+      }
+    }
+
+    // Last resort: unique basename match (normalized).
+    const basenameCandidates = Array.from(candidates)
+      .map(c => c.split('/').pop() ?? c)
+      .filter(Boolean)
+      .map(toSuperLooseKey);
+
+    for (const base of basenameCandidates) {
+      const matches = files.filter(f => toSuperLooseKey(f.name) === base);
+      if (matches.length === 1) return matches[0];
+    }
+
+    return null;
+  }
+
+  /**
+   * Post-process a rendered markdown element to find vault-note paths
+   * (patterns ending in .md optionally inside a path) and make them
+   * clickable. Looks inside text nodes so it doesn't break existing links.
+   */
+  private makeNoteLinksClickable(el: HTMLElement): void {
+    const makeOpenInTabHandler = (resolvedPath: string) => (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.openNotes([resolvedPath]);
+    };
+
+    const toNoteAnchor = (path: string): HTMLAnchorElement => {
+      const chip = document.createElement('a');
+      chip.className = 'llama-note-link';
+      chip.textContent = path;
+      chip.title = `Open "${path}" in a new tab`;
+      chip.href = '#';
+      chip.addEventListener('click', makeOpenInTabHandler(path));
+      return chip;
+    };
+
+    // Convert inline-code note paths (e.g. `Folder/Note.md`) into clickable links.
+    for (const codeEl of Array.from(el.querySelectorAll('code'))) {
+      if (codeEl.closest('pre')) continue;
+      const raw = (codeEl.textContent ?? '').trim();
+      if (!raw || !/\.md(?:#.*)?$/i.test(raw)) continue;
+
+      const pathOnly = raw.replace(/^\.?\//, '').replace(/#.*$/, '');
+      const file = this.resolveNoteFile(pathOnly);
+      if (!file) continue;
+
+      codeEl.replaceWith(toNoteAnchor(file.path));
+    }
+
+    // Upgrade existing markdown links that point to vault markdown notes.
+    for (const anchor of Array.from(el.querySelectorAll('a'))) {
+      const href = anchor.getAttribute('href') ?? '';
+      const decoded = href ? decodeURIComponent(href) : '';
+      const raw = decoded || anchor.textContent || href;
+      if (!raw || !/\.md(?:#.*)?$/i.test(raw.trim())) continue;
+
+      const pathOnly = raw.replace(/^\.?\//, '').replace(/#.*$/, '');
+      const file = this.resolveNoteFile(pathOnly);
+      if (!file) continue;
+
+      anchor.classList.add('llama-note-link');
+      anchor.setAttribute('title', `Open "${file.path}" in a new tab`);
+      anchor.addEventListener('click', makeOpenInTabHandler(file.path));
+    }
+
+    // Regex: matches vault-relative paths ending in .md.
+    // Allows any char except /  \n  \r  and common Markdown punctuation that
+    // would never appear raw inside a path (* " < > | ?).
+    // Relies on getAbstractFileByPath() to reject false positives.
+    const NOTE_PATH_RE = /(?:[^\/\n\r"*<>|?\[\]()]+\/)*[^\/\n\r"*<>|?\[\]()]+\.md/gu;
+
+    const walkTextNodes = (node: Node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent ?? '';
+        const matches = [...text.matchAll(NOTE_PATH_RE)];
+        if (matches.length === 0) return;
+
+        const frag = document.createDocumentFragment();
+        let lastIdx = 0;
+
+        for (const match of matches) {
+          const start = match.index!;
+          const end = start + match[0].length;
+          const matchedPath = match[0].trim();
+
+          // Only linkify if the file actually exists in the vault
+          const file = this.resolveNoteFile(matchedPath);
+          if (!file) continue;
+
+          // Text before the match
+          if (start > lastIdx) {
+            frag.appendChild(document.createTextNode(text.slice(lastIdx, start)));
+          }
+
+          // Clickable note link chip
+          const chip = toNoteAnchor(file.path);
+          frag.appendChild(chip);
+
+          lastIdx = end;
+        }
+
+        // Remainder
+        if (lastIdx < text.length) {
+          frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+        }
+
+        if (lastIdx > 0) {
+          node.parentNode?.replaceChild(frag, node);
+        }
+      } else if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        !['A', 'CODE', 'PRE'].includes((node as Element).tagName)
+      ) {
+        // Walk children (copy array since we may mutate the DOM)
+        for (const child of Array.from(node.childNodes)) walkTextNodes(child);
+      }
+    };
+
+    walkTextNodes(el);
+  }
 
   private clearChat(): void {
     this.messages = [];

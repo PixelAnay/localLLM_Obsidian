@@ -141,6 +141,25 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'open_note',
+      description:
+        'Open one or more vault notes in new Obsidian editor tabs. Use this when the user explicitly asks to open or view a note.',
+      parameters: {
+        type: 'object',
+        properties: {
+          paths: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'List of vault-relative note paths to open, e.g. ["Projects/MyNote.md", "Journal/2024-01-01.md"]',
+          },
+        },
+        required: ['paths'],
+      },
+    },
+  },
 ] as const;
 
 // ─── Prompt-Injection Template (fallback mode) ────────────────────────────────
@@ -155,6 +174,7 @@ Available tools:
 - append_to_note(path, content): Append text to a note
 - edit_note(path, mode, old_text?, new_text?, new_content?): Edit a note
 - create_note(path, content, overwrite?): Create a new note
+- open_note(paths): Open one or more notes in editor tabs
 
 Format:
 <tool_call>
@@ -175,6 +195,9 @@ export interface UndoEntry {
 
 export class ToolExecutor {
   private undoStack: UndoEntry[] = [];
+
+  // Callback so ChatView can open notes without a circular dependency
+  onOpenNotes?: (paths: string[]) => void;
 
   constructor(
     private app: App,
@@ -203,6 +226,7 @@ export class ToolExecutor {
         case 'append_to_note': return await this.toolAppendToNote(args);
         case 'edit_note':      return await this.toolEditNote(args);
         case 'create_note':    return await this.toolCreateNote(args);
+        case 'open_note':      return await this.toolOpenNote(args);
         default:               return `Error: Unknown tool "${name}"`;
       }
     } catch (e) {
@@ -381,6 +405,35 @@ export class ToolExecutor {
     if (file) await this.indexer.updateFile(file);
 
     return `✅ Created "${path}" (${content.length} chars)`;
+  }
+
+  private async toolOpenNote(args: Record<string, unknown>): Promise<string> {
+    const rawPaths = Array.isArray(args.paths) ? args.paths.map(String) : [];
+    if (rawPaths.length === 0) return 'Error: No paths provided';
+
+    const opened: string[] = [];
+    const missing: string[] = [];
+
+    for (const p of rawPaths) {
+      const validated = this.validatePath(p);
+      if (!validated) { missing.push(p); continue; }
+      const file = this.app.vault.getAbstractFileByPath(validated);
+      if (!(file instanceof TFile)) { missing.push(p); continue; }
+      opened.push(validated);
+    }
+
+    if (opened.length === 0) {
+      return `Error: None of the specified notes were found: ${rawPaths.join(', ')}`;
+    }
+
+    // Delegate actual UI opening to ChatView via callback
+    if (this.onOpenNotes) {
+      this.onOpenNotes(opened);
+    }
+
+    const report = opened.map(p => `"${p}"`).join(', ');
+    const missingReport = missing.length > 0 ? ` (not found: ${missing.map(p => `"${p}"`).join(', ')})` : '';
+    return `✅ Opened ${opened.length} note(s): ${report}${missingReport}`;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

@@ -577,3 +577,43 @@
   .llama-welcome-chips { display: none; }
   .llama-note-count    { display: none; }
 }
+
+/* ── Clickable Note Links (in AI responses) ──────────────────────────────── */
+.llama-note-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  color: var(--color-accent);
+  font-size: 0.9em;
+  font-family: var(--font-monospace);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s, box-shadow 0.1s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  vertical-align: middle;
+  line-height: 1.4;
+}
+
+.llama-note-link::before {
+  content: '📄';
+  font-size: 0.8em;
+  flex-shrink: 0;
+}
+
+.llama-note-link:hover {
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+.llama-note-link:active {
+  transform: translateY(0);
+  box-shadow: none;
+}

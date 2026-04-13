@@ -92,6 +92,7 @@ var ChatView = class extends import_obsidian.ItemView {
   async onOpen() {
     this.buildUI();
     await this.checkConnection();
+    this.plugin.toolExecutor.onOpenNotes = (paths) => this.openNotes(paths);
   }
   async onClose() {
     this.plugin.llmClient.abort();
@@ -442,6 +443,9 @@ var ChatView = class extends import_obsidian.ItemView {
     }
     if (msg.content) {
       renderMarkdownCompat(this.app, msg.content, contentEl, this);
+      if (msg.role === "assistant") {
+        this.makeNoteLinksClickable(contentEl);
+      }
     }
     if (msg.streaming) {
       const cursor = bubble.createSpan("llama-cursor");
@@ -480,6 +484,160 @@ var ChatView = class extends import_obsidian.ItemView {
     });
   }
   // ── Actions ────────────────────────────────────────────────────────────────
+  /**
+   * Open one or more vault notes in new editor tabs.
+   * The first note gets focus; additional notes open as background tabs.
+   */
+  async openNotes(paths) {
+    const { workspace } = this.app;
+    for (let i = 0; i < paths.length; i++) {
+      const leaf = workspace.getLeaf("tab");
+      const file = this.resolveNoteFile(paths[i]);
+      if (file) {
+        await leaf.openFile(file, { active: i === 0 });
+      }
+    }
+  }
+  resolveNoteFile(rawPath) {
+    const candidates = /* @__PURE__ */ new Set();
+    const trimmed = (rawPath != null ? rawPath : "").trim();
+    if (!trimmed)
+      return null;
+    const addCandidate = (value) => {
+      const v = value.trim();
+      if (!v)
+        return;
+      candidates.add(v);
+      candidates.add(v.normalize("NFC"));
+      candidates.add(v.normalize("NFD"));
+    };
+    addCandidate(trimmed.replace(/\\/g, "/"));
+    addCandidate(trimmed.replace(/[“”]/g, '"').replace(/[‘’]/g, "'"));
+    addCandidate(trimmed.replace(/[\]\[(){}<>'"`.,;:!?]+$/g, ""));
+    try {
+      addCandidate(decodeURIComponent(trimmed));
+    } catch (e) {
+    }
+    for (const candidate of candidates) {
+      const file = this.app.vault.getAbstractFileByPath(candidate);
+      if (file)
+        return file;
+    }
+    const toKey = (value) => value.replace(/\\/g, "/").normalize("NFC").toLowerCase();
+    const candidateKeys = new Set(Array.from(candidates).map(toKey));
+    const toSuperLooseKey = (value) => value.normalize("NFC").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const files = this.app.vault.getMarkdownFiles();
+    for (const f of files) {
+      if (candidateKeys.has(toKey(f.path)))
+        return f;
+    }
+    for (const candidate of candidates) {
+      const cKey = toKey(candidate);
+      const cLoose = toSuperLooseKey(candidate);
+      for (const f of files) {
+        const fKey = toKey(f.path);
+        const fLoose = toSuperLooseKey(f.path);
+        if (fKey.endsWith(cKey) || cKey.endsWith(fKey))
+          return f;
+        if (fLoose.endsWith(cLoose) || cLoose.endsWith(fLoose))
+          return f;
+      }
+    }
+    const basenameCandidates = Array.from(candidates).map((c) => {
+      var _a;
+      return (_a = c.split("/").pop()) != null ? _a : c;
+    }).filter(Boolean).map(toSuperLooseKey);
+    for (const base of basenameCandidates) {
+      const matches = files.filter((f) => toSuperLooseKey(f.name) === base);
+      if (matches.length === 1)
+        return matches[0];
+    }
+    return null;
+  }
+  /**
+   * Post-process a rendered markdown element to find vault-note paths
+   * (patterns ending in .md optionally inside a path) and make them
+   * clickable. Looks inside text nodes so it doesn't break existing links.
+   */
+  makeNoteLinksClickable(el) {
+    var _a, _b;
+    const makeOpenInTabHandler = (resolvedPath) => (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.openNotes([resolvedPath]);
+    };
+    const toNoteAnchor = (path) => {
+      const chip = document.createElement("a");
+      chip.className = "llama-note-link";
+      chip.textContent = path;
+      chip.title = `Open "${path}" in a new tab`;
+      chip.href = "#";
+      chip.addEventListener("click", makeOpenInTabHandler(path));
+      return chip;
+    };
+    for (const codeEl of Array.from(el.querySelectorAll("code"))) {
+      if (codeEl.closest("pre"))
+        continue;
+      const raw = ((_a = codeEl.textContent) != null ? _a : "").trim();
+      if (!raw || !/\.md(?:#.*)?$/i.test(raw))
+        continue;
+      const pathOnly = raw.replace(/^\.?\//, "").replace(/#.*$/, "");
+      const file = this.resolveNoteFile(pathOnly);
+      if (!file)
+        continue;
+      codeEl.replaceWith(toNoteAnchor(file.path));
+    }
+    for (const anchor of Array.from(el.querySelectorAll("a"))) {
+      const href = (_b = anchor.getAttribute("href")) != null ? _b : "";
+      const decoded = href ? decodeURIComponent(href) : "";
+      const raw = decoded || anchor.textContent || href;
+      if (!raw || !/\.md(?:#.*)?$/i.test(raw.trim()))
+        continue;
+      const pathOnly = raw.replace(/^\.?\//, "").replace(/#.*$/, "");
+      const file = this.resolveNoteFile(pathOnly);
+      if (!file)
+        continue;
+      anchor.classList.add("llama-note-link");
+      anchor.setAttribute("title", `Open "${file.path}" in a new tab`);
+      anchor.addEventListener("click", makeOpenInTabHandler(file.path));
+    }
+    const NOTE_PATH_RE = /(?:[^\/\n\r"*<>|?\[\]()]+\/)*[^\/\n\r"*<>|?\[\]()]+\.md/gu;
+    const walkTextNodes = (node) => {
+      var _a2, _b2;
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = (_a2 = node.textContent) != null ? _a2 : "";
+        const matches = [...text.matchAll(NOTE_PATH_RE)];
+        if (matches.length === 0)
+          return;
+        const frag = document.createDocumentFragment();
+        let lastIdx = 0;
+        for (const match of matches) {
+          const start = match.index;
+          const end = start + match[0].length;
+          const matchedPath = match[0].trim();
+          const file = this.resolveNoteFile(matchedPath);
+          if (!file)
+            continue;
+          if (start > lastIdx) {
+            frag.appendChild(document.createTextNode(text.slice(lastIdx, start)));
+          }
+          const chip = toNoteAnchor(file.path);
+          frag.appendChild(chip);
+          lastIdx = end;
+        }
+        if (lastIdx < text.length) {
+          frag.appendChild(document.createTextNode(text.slice(lastIdx)));
+        }
+        if (lastIdx > 0) {
+          (_b2 = node.parentNode) == null ? void 0 : _b2.replaceChild(frag, node);
+        }
+      } else if (node.nodeType === Node.ELEMENT_NODE && !["A", "CODE", "PRE"].includes(node.tagName)) {
+        for (const child of Array.from(node.childNodes))
+          walkTextNodes(child);
+      }
+    };
+    walkTextNodes(el);
+  }
   clearChat() {
     this.messages = [];
     this.displayMessages = [];
@@ -919,6 +1077,24 @@ var TOOL_DEFINITIONS = [
         required: ["path", "content"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_note",
+      description: "Open one or more vault notes in new Obsidian editor tabs. Use this when the user explicitly asks to open or view a note.",
+      parameters: {
+        type: "object",
+        properties: {
+          paths: {
+            type: "array",
+            items: { type: "string" },
+            description: 'List of vault-relative note paths to open, e.g. ["Projects/MyNote.md", "Journal/2024-01-01.md"]'
+          }
+        },
+        required: ["paths"]
+      }
+    }
   }
 ];
 var TOOL_INJECTION_PROMPT = `
@@ -931,6 +1107,7 @@ Available tools:
 - append_to_note(path, content): Append text to a note
 - edit_note(path, mode, old_text?, new_text?, new_content?): Edit a note
 - create_note(path, content, overwrite?): Create a new note
+- open_note(paths): Open one or more notes in editor tabs
 
 Format:
 <tool_call>
@@ -969,6 +1146,8 @@ var ToolExecutor = class {
           return await this.toolEditNote(args);
         case "create_note":
           return await this.toolCreateNote(args);
+        case "open_note":
+          return await this.toolOpenNote(args);
         default:
           return `Error: Unknown tool "${name}"`;
       }
@@ -1139,6 +1318,35 @@ ${oldText}
     if (file)
       await this.indexer.updateFile(file);
     return `\u2705 Created "${path}" (${content.length} chars)`;
+  }
+  async toolOpenNote(args) {
+    const rawPaths = Array.isArray(args.paths) ? args.paths.map(String) : [];
+    if (rawPaths.length === 0)
+      return "Error: No paths provided";
+    const opened = [];
+    const missing = [];
+    for (const p of rawPaths) {
+      const validated = this.validatePath(p);
+      if (!validated) {
+        missing.push(p);
+        continue;
+      }
+      const file = this.app.vault.getAbstractFileByPath(validated);
+      if (!(file instanceof import_obsidian3.TFile)) {
+        missing.push(p);
+        continue;
+      }
+      opened.push(validated);
+    }
+    if (opened.length === 0) {
+      return `Error: None of the specified notes were found: ${rawPaths.join(", ")}`;
+    }
+    if (this.onOpenNotes) {
+      this.onOpenNotes(opened);
+    }
+    const report = opened.map((p) => `"${p}"`).join(", ");
+    const missingReport = missing.length > 0 ? ` (not found: ${missing.map((p) => `"${p}"`).join(", ")})` : "";
+    return `\u2705 Opened ${opened.length} note(s): ${report}${missingReport}`;
   }
   // ── Helpers ───────────────────────────────────────────────────────────────
   validatePath(raw) {
@@ -1402,6 +1610,8 @@ Today is ${today}.
 You have full general knowledge and should answer questions normally, just like any capable AI assistant.
 In addition, you have special tools that give you access to the user's Obsidian vault (their Markdown notes).
 Use vault tools when: the user asks about their notes, wants to search/edit/create notes, or asks something that would benefit from checking their personal knowledge base.
+When the user asks to open a note (or multiple notes), call the open_note tool instead of only listing paths in text.
+For requests like open every note about a topic, first search for matching notes, then call open_note with every relevant path.
 Do NOT use vault tools for general knowledge questions (history, science, language, coding, etc.) \u2014 just answer those directly.
 Be concise and helpful. When you do reference vault content, cite the note path.`
     );
