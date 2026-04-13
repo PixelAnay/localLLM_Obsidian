@@ -1,0 +1,70 @@
+{
+  "index": {
+    "version": 2,
+    "buildTime": 1776115780679,
+    "notes": {
+      "Age.md": {
+        "path": "Age.md",
+        "title": "Age",
+        "tags": [],
+        "frontmatter": {},
+        "mtime": 1776113838685,
+        "wordCount": 2,
+        "size": 12
+      },
+      "anay.md": {
+        "path": "anay.md",
+        "title": "anay",
+        "tags": [],
+        "frontmatter": {},
+        "mtime": 1776115776696,
+        "wordCount": 8,
+        "size": 38
+      },
+      "README.md": {
+        "path": "README.md",
+        "title": "README",
+        "tags": [],
+        "frontmatter": {},
+        "mtime": 1776115996077,
+        "wordCount": 8,
+        "size": 38
+      },
+      "HI.md": {
+        "path": "HI.md",
+        "title": "HI",
+        "tags": [],
+        "frontmatter": {},
+        "mtime": 1776113829547,
+        "wordCount": 3,
+        "size": 15
+      },
+      "Welcome.md": {
+        "path": "Welcome.md",
+        "title": "Welcome",
+        "tags": [],
+        "frontmatter": {},
+        "mtime": 1776113796118,
+        "wordCount": 41,
+        "size": 203
+      }
+    }
+  },
+  "settings": {
+    "endpoint": "http://localhost:8080",
+    "model": "",
+    "systemPromptExtra": "",
+    "contextWindowTokens": 131072,
+    "autoInjectNotes": 3,
+    "editPermission": "full_edit",
+    "toolCallingMode": "native",
+    "excludePatterns": [
+      "Private/**",
+      "*.secret.md"
+    ],
+    "maxToolCallDepth": 10,
+    "showDiffPreview": true,
+    "diffPreviewThreshold": 200,
+    "temperature": 0.7
+  }
+}

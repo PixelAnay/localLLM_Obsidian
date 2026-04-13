@@ -1,0 +1,21 @@
+{
+  "name": "obsidian-llama-chat",
+  "version": "1.0.0",
+  "description": "Sidebar chat powered by your local LLM with full vault context",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": ["obsidian", "llm", "llama", "ai", "chat"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^16.18.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "0.17.3",
+    "obsidian": "latest",
+    "tslib": "2.4.0",
+    "typescript": "4.7.4"
+  }
+}

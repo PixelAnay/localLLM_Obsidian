@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-llama-chat",
+  "name": "LLAMA Chat",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Sidebar chat powered by your local LLM with full vault context, search, and edit capabilities.",
+  "author": "ObsidianPluginLLAMA",
+  "authorUrl": "",
+  "isDesktopOnly": true
+}
