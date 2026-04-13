@@ -37,6 +37,39 @@ function renderMarkdownCompat(app, source, el, component) {
     import_obsidian.MarkdownRenderer.renderMarkdown(source, el, "", component);
   }
 }
+async function getPdfJs() {
+  if (window.pdfjsLib)
+    return window.pdfjsLib;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js";
+    script.onload = () => {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js";
+      resolve(window.pdfjsLib);
+    };
+    script.onerror = () => reject(new Error("Failed to load pdf.js from CDN"));
+    document.head.appendChild(script);
+  });
+}
+function renderPdfPageToDataUrl(pdfDoc, pageNum) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const page = await pdfDoc.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d");
+      if (!ctx)
+        return reject(new Error("No canvas context"));
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const renderContext = { canvasContext: ctx, viewport };
+      await page.render(renderContext).promise;
+      resolve(canvas.toDataURL("image/jpeg", 0.85));
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
 var LLAMA_CHAT_VIEW_TYPE = "llama-chat-view";
 var ChatView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
@@ -44,6 +77,7 @@ var ChatView = class extends import_obsidian.ItemView {
     this.messages = [];
     this.displayMessages = [];
     this.isStreaming = false;
+    this.pendingAttachments = [];
     this.plugin = plugin;
   }
   getViewType() {
@@ -98,6 +132,7 @@ var ChatView = class extends import_obsidian.ItemView {
     this.messagesContainer = root.createDiv("llama-messages");
     this.renderWelcome();
     const inputBar = root.createDiv("llama-input-bar");
+    this.attachmentPreviewEl = inputBar.createDiv("llama-input-attachments");
     this.inputArea = inputBar.createEl("textarea", {
       cls: "llama-input",
       attr: { placeholder: "Ask anything about your vault\u2026", rows: "1" }
@@ -114,6 +149,54 @@ var ChatView = class extends import_obsidian.ItemView {
       }
     });
     const btnGroup = inputBar.createDiv("llama-btn-group");
+    const attachBtn = btnGroup.createEl("button", { cls: "llama-attach-btn", title: "Attach files" });
+    (0, import_obsidian.setIcon)(attachBtn, "paperclip");
+    this.attachInput = btnGroup.createEl("input", { attr: { type: "file", multiple: "true", style: "display: none" } });
+    attachBtn.addEventListener("click", () => this.attachInput.click());
+    this.attachInput.addEventListener("change", async (e) => {
+      const target = e.target;
+      const files = target.files;
+      if (!files)
+        return;
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        if (f.type === "application/pdf") {
+          try {
+            new import_obsidian.Notice(`Processing PDF: ${f.name}...`);
+            const pdfjsLib = await getPdfJs();
+            const arrayBuffer = await f.arrayBuffer();
+            const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+            const pagesToConvert = Math.min(pdfDoc.numPages, 20);
+            for (let p = 1; p <= pagesToConvert; p++) {
+              const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
+              this.pendingAttachments.push({
+                name: `${f.name} (Page ${p})`,
+                type: "image/jpeg",
+                dataUrl
+              });
+            }
+            if (pdfDoc.numPages > 20) {
+              new import_obsidian.Notice(`Limited ${f.name} to first 20 pages to avoid context overload.`);
+            } else {
+              new import_obsidian.Notice(`Finished processing ${f.name}`);
+            }
+          } catch (err) {
+            console.error("PDF parsing error", err);
+            new import_obsidian.Notice("Failed to parse PDF pages into images.");
+          }
+        } else {
+          const dataUrl = await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.readAsDataURL(f);
+          });
+          this.pendingAttachments.push({ name: f.name, type: f.type, dataUrl });
+        }
+      }
+      this.renderAttachmentPreviews();
+      target.value = "";
+    });
+    btnGroup.createDiv("llama-btn-spacer");
     this.sendBtn = btnGroup.createEl("button", { cls: "llama-send-btn", text: "Send" });
     (0, import_obsidian.setIcon)(this.sendBtn, "send");
     this.sendBtn.addEventListener("click", () => this.sendMessage());
@@ -164,20 +247,35 @@ var ChatView = class extends import_obsidian.ItemView {
   // ── Sending Messages ───────────────────────────────────────────────────────
   async sendMessage() {
     const text = this.inputArea.value.trim();
-    if (!text || this.isStreaming)
+    const hasAttachments = this.pendingAttachments.length > 0;
+    if (!text && !hasAttachments || this.isStreaming)
       return;
     this.inputArea.value = "";
     this.inputArea.style.height = "auto";
-    this.displayMessages.push({ role: "user", content: text });
-    this.messages.push({ role: "user", content: text });
+    const attachmentsToMove = [...this.pendingAttachments];
+    this.pendingAttachments = [];
+    this.renderAttachmentPreviews();
+    let content = text;
+    if (attachmentsToMove.length > 0) {
+      const parts = [];
+      if (text) {
+        parts.push({ type: "text", text });
+      }
+      for (const att of attachmentsToMove) {
+        parts.push({ type: "image_url", image_url: { url: att.dataUrl } });
+      }
+      content = parts;
+    }
+    this.displayMessages.push({ role: "user", content: text, attachments: attachmentsToMove });
+    this.messages.push({ role: "user", content, attachments: attachmentsToMove });
     this.renderMessages();
     this.setStreaming(true);
     const enrichedMessages = await this.plugin.contextBuilder.prependSystemMessage(
       this.messages.slice(0, -1),
       // all except the just-added user msg (context builder handles it)
-      text
+      text || "See attachment(s)"
     );
-    enrichedMessages.push({ role: "user", content: text });
+    enrichedMessages.push({ role: "user", content });
     const assistantDisplay = { role: "assistant", content: "", streaming: true, toolEvents: [] };
     this.displayMessages.push(assistantDisplay);
     this.renderMessages();
@@ -258,6 +356,10 @@ var ChatView = class extends import_obsidian.ItemView {
     this.inputArea.focus();
     this.inputArea.style.height = "auto";
     this.inputArea.style.height = this.inputArea.scrollHeight + "px";
+    if (msg.attachments) {
+      this.pendingAttachments = [...msg.attachments];
+      this.renderAttachmentPreviews();
+    }
     this.renderMessages();
   }
   renderWelcome() {
@@ -322,6 +424,22 @@ var ChatView = class extends import_obsidian.ItemView {
       }
     }
     const contentEl = bubble.createDiv("llama-bubble-content");
+    if (msg.attachments && msg.attachments.length > 0) {
+      const attContainer = bubble.createDiv("llama-input-attachments");
+      attContainer.style.marginBottom = msg.content ? "8px" : "0";
+      for (const att of msg.attachments) {
+        if (att.type.startsWith("image/")) {
+          const img = attContainer.createEl("img", { attr: { src: att.dataUrl, alt: att.name } });
+          img.style.maxWidth = "100%";
+          img.style.borderRadius = "var(--radius-s)";
+          img.style.maxHeight = "200px";
+          img.style.objectFit = "contain";
+        } else {
+          const chip = attContainer.createDiv("llama-attachment-chip");
+          chip.createSpan("llama-attachment-name").textContent = att.name;
+        }
+      }
+    }
     if (msg.content) {
       renderMarkdownCompat(this.app, msg.content, contentEl, this);
     }
@@ -382,6 +500,20 @@ var ChatView = class extends import_obsidian.ItemView {
     this.inputArea.disabled = streaming;
     if (!streaming) {
       this.inputArea.focus();
+    }
+  }
+  renderAttachmentPreviews() {
+    this.attachmentPreviewEl.empty();
+    for (let i = 0; i < this.pendingAttachments.length; i++) {
+      const att = this.pendingAttachments[i];
+      const chip = this.attachmentPreviewEl.createDiv("llama-attachment-chip");
+      chip.createSpan("llama-attachment-name").textContent = att.name;
+      const removeBtn = chip.createSpan("llama-attachment-remove");
+      (0, import_obsidian.setIcon)(removeBtn, "x");
+      removeBtn.addEventListener("click", () => {
+        this.pendingAttachments.splice(i, 1);
+        this.renderAttachmentPreviews();
+      });
     }
   }
 };

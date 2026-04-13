@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, setIcon, Component } from 'obsidian';
 import type LlamaPlugin from './main';
-import type { ChatMessage, StreamChunk } from './types';
+import type { ChatMessage, StreamChunk, MessageContentPart } from './types';
 
 /** Render Markdown safely across Obsidian versions */
 function renderMarkdownCompat(
@@ -18,11 +18,50 @@ function renderMarkdownCompat(
   }
 }
 
+const CHAT_HISTORY_KEY = 'llama-chat-history';
+
+async function getPdfJs(): Promise<any> {
+  if ((window as any).pdfjsLib) return (window as any).pdfjsLib;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js';
+    script.onload = () => {
+      (window as any).pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+      resolve((window as any).pdfjsLib);
+    };
+    script.onerror = () => reject(new Error('Failed to load pdf.js from CDN'));
+    document.head.appendChild(script);
+  });
+}
+
+function renderPdfPageToDataUrl(pdfDoc: any, pageNum: number): Promise<string> {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const page = await pdfDoc.getPage(pageNum);
+      // scale 2.0 ensures text is crisp enough for the vision model
+      const viewport = page.getViewport({ scale: 2.0 });
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('No canvas context'));
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      const renderContext = { canvasContext: ctx, viewport: viewport };
+      await page.render(renderContext).promise;
+
+      resolve(canvas.toDataURL('image/jpeg', 0.85));
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
 export const LLAMA_CHAT_VIEW_TYPE = 'llama-chat-view';
 
 interface DisplayMessage {
   role: 'user' | 'assistant' | 'error';
   content: string;
+  attachments?: { name: string; type: string; dataUrl: string }[];
   toolEvents?: ToolEvent[];
   streaming?: boolean;
 }
@@ -38,6 +77,7 @@ export class ChatView extends ItemView {
   private messages: ChatMessage[] = [];
   private displayMessages: DisplayMessage[] = [];
   private isStreaming = false;
+  private pendingAttachments: { name: string; type: string; dataUrl: string }[] = [];
 
   // DOM refs
   private statusDot!: HTMLElement;
@@ -47,6 +87,8 @@ export class ChatView extends ItemView {
   private sendBtn!: HTMLButtonElement;
   private stopBtn!: HTMLButtonElement;
   private noteCountEl!: HTMLElement;
+  private attachInput!: HTMLInputElement;
+  private attachmentPreviewEl!: HTMLElement;
 
   constructor(leaf: WorkspaceLeaf, plugin: LlamaPlugin) {
     super(leaf);
@@ -117,6 +159,8 @@ export class ChatView extends ItemView {
     // ── Input Bar ─────────────────────────────────────────────────────────────
     const inputBar = root.createDiv('llama-input-bar');
 
+    this.attachmentPreviewEl = inputBar.createDiv('llama-input-attachments');
+
     this.inputArea = inputBar.createEl('textarea', {
       cls: 'llama-input',
       attr: { placeholder: 'Ask anything about your vault…', rows: '1' },
@@ -136,6 +180,58 @@ export class ChatView extends ItemView {
     });
 
     const btnGroup = inputBar.createDiv('llama-btn-group');
+
+    const attachBtn = btnGroup.createEl('button', { cls: 'llama-attach-btn', title: 'Attach files' });
+    setIcon(attachBtn, 'paperclip');
+
+    this.attachInput = btnGroup.createEl('input', { attr: { type: 'file', multiple: 'true', style: 'display: none' } });
+    attachBtn.addEventListener('click', () => this.attachInput.click());
+
+    this.attachInput.addEventListener('change', async (e: Event) => {
+      const target = e.target as HTMLInputElement;
+      const files = target.files;
+      if (!files) return;
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        if (f.type === 'application/pdf') {
+          try {
+            new Notice(`Processing PDF: ${f.name}...`);
+            const pdfjsLib = await getPdfJs();
+            const arrayBuffer = await f.arrayBuffer();
+            const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+
+            const pagesToConvert = Math.min(pdfDoc.numPages, 14);
+            for (let p = 1; p <= pagesToConvert; p++) {
+              const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
+              this.pendingAttachments.push({
+                name: `${f.name} (Page ${p})`,
+                type: 'image/jpeg',
+                dataUrl
+              });
+            }
+            if (pdfDoc.numPages > 14) {
+              new Notice(`Limited ${f.name} to first 14 pages to avoid context overload.`);
+            } else {
+              new Notice(`Finished processing ${f.name}`);
+            }
+          } catch (err) {
+            console.error('PDF parsing error', err);
+            new Notice('Failed to parse PDF pages into images.');
+          }
+        } else {
+          const dataUrl = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.readAsDataURL(f);
+          });
+          this.pendingAttachments.push({ name: f.name, type: f.type, dataUrl });
+        }
+      }
+      this.renderAttachmentPreviews();
+      target.value = '';
+    });
+
+    btnGroup.createDiv('llama-btn-spacer');
 
     this.sendBtn = btnGroup.createEl('button', { cls: 'llama-send-btn', text: 'Send' });
     setIcon(this.sendBtn, 'send');
@@ -199,14 +295,34 @@ export class ChatView extends ItemView {
 
   private async sendMessage(): Promise<void> {
     const text = this.inputArea.value.trim();
-    if (!text || this.isStreaming) return;
+    const hasAttachments = this.pendingAttachments.length > 0;
+    if ((!text && !hasAttachments) || this.isStreaming) return;
 
     this.inputArea.value = '';
     this.inputArea.style.height = 'auto';
 
+    const attachmentsToMove = [...this.pendingAttachments];
+    this.pendingAttachments = [];
+    this.renderAttachmentPreviews();
+
+    let content: string | MessageContentPart[] = text;
+    if (attachmentsToMove.length > 0) {
+      const parts: MessageContentPart[] = [];
+      if (text) {
+        parts.push({ type: 'text', text });
+      }
+      for (const att of attachmentsToMove) {
+        // OpenAI schema strictly enforces 'type' to be either 'text' or 'image_url'.
+        // For other formats (PDFs, Audio), passing the base64 string with the correct MIME type
+        // through the 'image_url' parameter allows the backend to handle it seamlessly.
+        parts.push({ type: 'image_url', image_url: { url: att.dataUrl } });
+      }
+      content = parts;
+    }
+
     // Add user message to display
-    this.displayMessages.push({ role: 'user', content: text });
-    this.messages.push({ role: 'user', content: text });
+    this.displayMessages.push({ role: 'user', content: text, attachments: attachmentsToMove });
+    this.messages.push({ role: 'user', content, attachments: attachmentsToMove });
     this.renderMessages();
 
     this.setStreaming(true);
@@ -214,9 +330,9 @@ export class ChatView extends ItemView {
     // Build context-enriched messages
     const enrichedMessages = await this.plugin.contextBuilder.prependSystemMessage(
       this.messages.slice(0, -1), // all except the just-added user msg (context builder handles it)
-      text
+      text || "See attachment(s)"
     );
-    enrichedMessages.push({ role: 'user', content: text });
+    enrichedMessages.push({ role: 'user', content });
 
     // Add empty streaming bubble
     const assistantDisplay: DisplayMessage = { role: 'assistant', content: '', streaming: true, toolEvents: [] };
@@ -304,6 +420,11 @@ export class ChatView extends ItemView {
     this.inputArea.style.height = 'auto';
     this.inputArea.style.height = this.inputArea.scrollHeight + 'px';
 
+    if (msg.attachments) {
+      this.pendingAttachments = [...msg.attachments];
+      this.renderAttachmentPreviews();
+    }
+
     this.renderMessages();
   }
 
@@ -379,6 +500,24 @@ export class ChatView extends ItemView {
 
     // Message content (Markdown rendered)
     const contentEl = bubble.createDiv('llama-bubble-content');
+
+    if (msg.attachments && msg.attachments.length > 0) {
+      const attContainer = bubble.createDiv('llama-input-attachments');
+      attContainer.style.marginBottom = msg.content ? '8px' : '0';
+      for (const att of msg.attachments) {
+        if (att.type.startsWith('image/')) {
+          const img = attContainer.createEl('img', { attr: { src: att.dataUrl, alt: att.name } });
+          img.style.maxWidth = '100%';
+          img.style.borderRadius = 'var(--radius-s)';
+          img.style.maxHeight = '200px';
+          img.style.objectFit = 'contain';
+        } else {
+          const chip = attContainer.createDiv('llama-attachment-chip');
+          chip.createSpan('llama-attachment-name').textContent = att.name;
+        }
+      }
+    }
+
     if (msg.content) {
       renderMarkdownCompat(this.app, msg.content, contentEl, this);
     }
@@ -392,7 +531,7 @@ export class ChatView extends ItemView {
     // Actions bar (Copy / Edit)
     if (!msg.streaming && msg.role !== 'error') {
       const actions = wrapper.createDiv('llama-msg-actions');
-      
+
       const copyBtn = actions.createEl('button', { cls: 'llama-msg-action-btn', title: 'Copy' });
       setIcon(copyBtn, 'copy');
       copyBtn.addEventListener('click', () => {
@@ -454,6 +593,21 @@ export class ChatView extends ItemView {
     if (!streaming) {
       // Re-focus so the user can type the next message immediately
       this.inputArea.focus();
+    }
+  }
+
+  private renderAttachmentPreviews(): void {
+    this.attachmentPreviewEl.empty();
+    for (let i = 0; i < this.pendingAttachments.length; i++) {
+      const att = this.pendingAttachments[i];
+      const chip = this.attachmentPreviewEl.createDiv('llama-attachment-chip');
+      chip.createSpan('llama-attachment-name').textContent = att.name;
+      const removeBtn = chip.createSpan('llama-attachment-remove');
+      setIcon(removeBtn, 'x');
+      removeBtn.addEventListener('click', () => {
+        this.pendingAttachments.splice(i, 1);
+        this.renderAttachmentPreviews();
+      });
     }
   }
 }

@@ -1,11 +1,19 @@
 // ─── LLM Message Types ──────────────────────────────────────────────────────
 
+export interface MessageContentPart {
+  type: string;
+  text?: string;
+  image_url?: { url: string };
+  [key: string]: any;
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string | null;
+  content: string | MessageContentPart[] | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
   name?: string;
+  attachments?: { name: string; type: string; dataUrl: string }[];
 }
 
 export interface ToolCall {

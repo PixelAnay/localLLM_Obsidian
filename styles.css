@@ -425,10 +425,75 @@
   cursor: not-allowed;
 }
 
+.llama-input-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.llama-input-attachments:empty {
+  display: none;
+}
+.llama-attachment-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--background-modifier-form-field);
+  border: 1px solid var(--background-modifier-border);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  max-width: 150px;
+}
+.llama-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.llama-attachment-remove {
+  cursor: pointer;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.llama-attachment-remove:hover {
+  color: var(--text-error);
+}
+.llama-attachment-remove svg {
+  width: 10px;
+  height: 10px;
+}
+
 .llama-btn-group {
   display: flex;
   gap: 6px;
-  justify-content: flex-end;
+  align-items: center;
+}
+
+.llama-btn-spacer {
+  flex: 1;
+}
+
+.llama-attach-btn {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+.llama-attach-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.llama-attach-btn svg {
+  width: 16px;
+  height: 16px;
 }
 
 .llama-send-btn,

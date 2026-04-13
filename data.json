@@ -21,15 +21,6 @@
         "wordCount": 8,
         "size": 38
       },
-      "README.md": {
-        "path": "README.md",
-        "title": "README",
-        "tags": [],
-        "frontmatter": {},
-        "mtime": 1776115996077,
-        "wordCount": 8,
-        "size": 38
-      },
       "HI.md": {
         "path": "HI.md",
         "title": "HI",
@@ -38,6 +29,15 @@
         "mtime": 1776113829547,
         "wordCount": 3,
         "size": 15
+      },
+      "README.md": {
+        "path": "README.md",
+        "title": "README",
+        "tags": [],
+        "frontmatter": {},
+        "mtime": 1776115996077,
+        "wordCount": 8,
+        "size": 38
       },
       "Welcome.md": {
         "path": "Welcome.md",
@@ -55,7 +55,7 @@
     "model": "",
     "systemPromptExtra": "",
     "contextWindowTokens": 131072,
-    "autoInjectNotes": 3,
+    "autoInjectNotes": 10,
     "editPermission": "full_edit",
     "toolCallingMode": "native",
     "excludePatterns": [
