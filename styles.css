@@ -218,7 +218,7 @@
   align-items: flex-start;
   animation: llama-msg-in 0.2s ease-out;
   position: relative;
-  margin-bottom: 18px; /* Room for actions bar */
+  margin-bottom: 8px;
 }
 
 @keyframes llama-msg-in {
@@ -231,19 +231,14 @@
 }
 
 .llama-msg-actions {
-  position: absolute;
-  bottom: -24px;
-  left: 36px; /* avatar (28) + gap (8) */
   display: flex;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
   transition: opacity 0.2s;
   pointer-events: none;
-}
-
-.llama-msg-user .llama-msg-actions {
-  left: auto;
-  right: 36px;
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 8px;
 }
 
 .llama-msg-wrapper:hover .llama-msg-actions {
