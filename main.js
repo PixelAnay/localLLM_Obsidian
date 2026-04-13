@@ -166,7 +166,7 @@ var ChatView = class extends import_obsidian.ItemView {
             const pdfjsLib = await getPdfJs();
             const arrayBuffer = await f.arrayBuffer();
             const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
-            const pagesToConvert = Math.min(pdfDoc.numPages, 20);
+            const pagesToConvert = Math.min(pdfDoc.numPages, 14);
             for (let p = 1; p <= pagesToConvert; p++) {
               const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
               this.pendingAttachments.push({
@@ -175,8 +175,8 @@ var ChatView = class extends import_obsidian.ItemView {
                 dataUrl
               });
             }
-            if (pdfDoc.numPages > 20) {
-              new import_obsidian.Notice(`Limited ${f.name} to first 20 pages to avoid context overload.`);
+            if (pdfDoc.numPages > 14) {
+              new import_obsidian.Notice(`Limited ${f.name} to first 14 pages to avoid context overload.`);
             } else {
               new import_obsidian.Notice(`Finished processing ${f.name}`);
             }
