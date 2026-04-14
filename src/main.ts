@@ -24,14 +24,6 @@ export default class LlamaPlugin extends Plugin {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   async onload(): Promise<void> {
-    // Desktop-only guard
-    if (Platform.isMobile) {
-      this.addRibbonIcon('message-circle', 'LLAMA Chat (desktop only)', () => {
-        new Notice('LLAMA Chat requires a desktop environment to reach your local LLM.');
-      });
-      return;
-    }
-
     await this.loadSettings();
     await this.loadChatSessions();
     this.initServices();

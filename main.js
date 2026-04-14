@@ -2570,12 +2570,6 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
   }
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   async onload() {
-    if (import_obsidian5.Platform.isMobile) {
-      this.addRibbonIcon("message-circle", "LLAMA Chat (desktop only)", () => {
-        new import_obsidian5.Notice("LLAMA Chat requires a desktop environment to reach your local LLM.");
-      });
-      return;
-    }
     await this.loadSettings();
     await this.loadChatSessions();
     this.initServices();

@@ -6,5 +6,5 @@
   "description": "Sidebar chat powered by your local LLM with full vault context, search, and edit capabilities.",
   "author": "ObsidianPluginLLAMA",
   "authorUrl": "",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }
