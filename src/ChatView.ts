@@ -701,6 +701,13 @@ export class ChatView extends ItemView {
       }
     }
 
+    const hasText = typeof msg.content === 'string' && msg.content.trim().length > 0;
+    if (msg.streaming && !hasText) {
+      const thinkingEl = contentEl.createDiv('llama-thinking');
+      thinkingEl.createSpan({ text: 'Thinking' });
+      thinkingEl.createSpan('llama-thinking-dots').textContent = '...';
+    }
+
     // Streaming cursor
     if (msg.streaming) {
       const cursor = bubble.createSpan('llama-cursor');

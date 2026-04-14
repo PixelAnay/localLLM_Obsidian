@@ -94,14 +94,15 @@ export class LlamaSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Auto-inject notes count')
-      .setDesc('Number of top-ranked relevant notes auto-injected into each message')
-      .addSlider(slider =>
-        slider
-          .setLimits(0, 10, 1)
-          .setValue(this.plugin.settings.autoInjectNotes)
-          .setDynamicTooltip()
+      .setDesc('Number of top-ranked relevant notes auto-injected into each message (actual count may be lower if context budget is reached)')
+      .addText(text =>
+        text
+          .setPlaceholder('3')
+          .setValue(String(this.plugin.settings.autoInjectNotes))
           .onChange(async value => {
-            this.plugin.settings.autoInjectNotes = value;
+            const parsed = Number.parseInt(value.trim(), 10);
+            if (Number.isNaN(parsed)) return;
+            this.plugin.settings.autoInjectNotes = Math.max(0, parsed);
             await this.plugin.saveSettings();
           })
       );

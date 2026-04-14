@@ -373,6 +373,27 @@
   color: white;
 }
 
+.llama-thinking {
+  display: inline-flex;
+  align-items: baseline;
+  color: var(--text-muted);
+  font-style: italic;
+  gap: 1px;
+}
+
+.llama-thinking-dots {
+  display: inline-block;
+  width: 3ch;
+  overflow: hidden;
+  white-space: nowrap;
+  animation: llama-thinking-dots 1.1s steps(4, end) infinite;
+}
+
+@keyframes llama-thinking-dots {
+  0% { width: 0ch; }
+  100% { width: 3ch; }
+}
+
 /* ── Streaming Cursor ────────────────────────────────────────────────────── */
 .llama-cursor {
   display: inline-block;
