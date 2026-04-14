@@ -1,15 +1,18 @@
 import { Plugin, WorkspaceLeaf, TFile, Platform, Notice } from 'obsidian';
 import { LLAMA_CHAT_VIEW_TYPE, ChatView } from './ChatView';
 import { VaultIndexer } from './indexer';
+import { EmbeddingIndex } from './embeddings';
 import { LLMClient } from './llm';
 import { ToolExecutor } from './tools';
 import { ContextBuilder } from './context';
 import { LlamaSettingTab, DEFAULT_SETTINGS } from './settings';
 import type { ChatSession, LlamaPluginSettings, VaultIndex } from './types';
+import type { EmbeddingIndexData } from './embeddings';
 
 export default class LlamaPlugin extends Plugin {
   settings!: LlamaPluginSettings;
   indexer!: VaultIndexer;
+  embeddingIndex!: EmbeddingIndex;
   llmClient!: LLMClient;
   toolExecutor!: ToolExecutor;
   contextBuilder!: ContextBuilder;
@@ -132,9 +135,10 @@ export default class LlamaPlugin extends Plugin {
 
   private initServices(): void {
     this.indexer = new VaultIndexer(this.app, this.settings);
+    this.embeddingIndex = new EmbeddingIndex(this.app, this.settings);
     this.llmClient = new LLMClient(this.settings);
     this.toolExecutor = new ToolExecutor(this.app, this.indexer, this.settings);
-    this.contextBuilder = new ContextBuilder(this.indexer, this.settings);
+    this.contextBuilder = new ContextBuilder(this.indexer, this.embeddingIndex, this.settings);
   }
 
   // ── Vault Indexing ─────────────────────────────────────────────────────────
@@ -142,11 +146,22 @@ export default class LlamaPlugin extends Plugin {
   private async buildIndexInBackground(): Promise<void> {
     const data = await this.loadData();
     const savedIndex: VaultIndex | null = data?.index ?? null;
+    const savedEmbeds: EmbeddingIndexData | null = data?.embeddings ?? null;
 
     try {
       await this.indexer.build(savedIndex);
-      await this.persistIndex();
       console.log(`[LLAMA Chat] Vault indexed: ${this.indexer.noteCount} notes`);
+
+      // Build embedding index incrementally (non-blocking, may take a few seconds)
+      if (this.settings.embeddingModel) {
+        await this.embeddingIndex.build(
+          savedEmbeds,
+          path => this.indexer.readNote(path)
+        );
+        console.log(`[LLAMA Chat] Embeddings: ${this.embeddingIndex.entryCount} notes embedded`);
+      }
+
+      await this.persistIndex();
     } catch (e) {
       console.error('[LLAMA Chat] Indexing error:', e);
     }
@@ -154,14 +169,25 @@ export default class LlamaPlugin extends Plugin {
 
   private async persistIndex(): Promise<void> {
     const existing = (await this.loadData()) ?? {};
-    await this.saveData({ ...existing, index: this.indexer.getSerializable() });
+    const update: Record<string, any> = {
+      ...existing,
+      index: this.indexer.getSerializable(),
+    };
+    if (this.embeddingIndex.isReady) {
+      update.embeddings = this.embeddingIndex.toJSON();
+    }
+    await this.saveData(update);
   }
 
   private async rebuildIndex(): Promise<void> {
     new Notice('🦙 Re-indexing vault…');
     await this.indexer.build(null);
+    if (this.settings.embeddingModel) {
+      new Notice('🦙 Building embeddings (this may take a minute)…');
+      await this.embeddingIndex.build(null, path => this.indexer.readNote(path));
+    }
     await this.persistIndex();
-    new Notice(`🦙 Vault indexed: ${this.indexer.noteCount} notes`);
+    new Notice(`🦙 Vault indexed: ${this.indexer.noteCount} notes${this.embeddingIndex.isReady ? `, ${this.embeddingIndex.entryCount} embedded` : ''}`);
   }
 
   // ── Vault Event Handlers ───────────────────────────────────────────────────
@@ -171,6 +197,11 @@ export default class LlamaPlugin extends Plugin {
       this.app.vault.on('create', async file => {
         if (file instanceof TFile && file.extension === 'md') {
           await this.indexer.updateFile(file);
+          // Embed the new file (fire-and-forget; errors silently ignored)
+          if (this.settings.embeddingModel) {
+            const content = await this.indexer.readNote(file.path);
+            if (content) this.embeddingIndex.embedFile(file, content);
+          }
           this.schedulePersist();
         }
       })
@@ -180,6 +211,10 @@ export default class LlamaPlugin extends Plugin {
       this.app.vault.on('modify', async file => {
         if (file instanceof TFile && file.extension === 'md') {
           await this.indexer.updateFile(file);
+          if (this.settings.embeddingModel) {
+            const content = await this.indexer.readNote(file.path);
+            if (content) this.embeddingIndex.embedFile(file, content);
+          }
           this.schedulePersist();
         }
       })
@@ -189,6 +224,7 @@ export default class LlamaPlugin extends Plugin {
       this.app.vault.on('delete', file => {
         if (file instanceof TFile && file.extension === 'md') {
           this.indexer.removeFile(file.path);
+          this.embeddingIndex.removeFile(file.path);
           this.schedulePersist();
         }
       })
@@ -198,6 +234,7 @@ export default class LlamaPlugin extends Plugin {
       this.app.vault.on('rename', async (file, oldPath) => {
         if (file instanceof TFile && file.extension === 'md') {
           await this.indexer.renameFile(file, oldPath);
+          this.embeddingIndex.renameFile(oldPath, file.path, file.stat.mtime);
           this.schedulePersist();
         }
       })

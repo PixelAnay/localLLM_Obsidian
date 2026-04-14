@@ -70,6 +70,79 @@ interface ToolEvent {
   result?: string;
 }
 
+// ── PDF Page Range Modal ──────────────────────────────────────────────────────
+
+function showPdfPageRangeModal(
+  fileName: string,
+  totalPages: number,
+  onConfirm: (from: number, to: number) => void,
+  onCancel: () => void
+): void {
+  const overlay = document.createElement('div');
+  overlay.className = 'llama-modal-overlay';
+
+  const modal = overlay.appendChild(document.createElement('div'));
+  modal.className = 'llama-modal';
+
+  const title = modal.appendChild(document.createElement('div'));
+  title.className = 'llama-modal-title';
+  title.textContent = `📄 PDF: ${fileName}`;
+
+  const subtitle = modal.appendChild(document.createElement('div'));
+  subtitle.className = 'llama-modal-subtitle';
+  subtitle.textContent = `${totalPages} pages — select which pages to send`;
+
+  const row = modal.appendChild(document.createElement('div'));
+  row.className = 'llama-modal-row';
+
+  const fromLabel = row.appendChild(document.createElement('label'));
+  fromLabel.textContent = 'From page';
+  const fromInput = row.appendChild(document.createElement('input'));
+  fromInput.type = 'number';
+  fromInput.min = '1';
+  fromInput.max = String(totalPages);
+  fromInput.value = '1';
+  fromInput.className = 'llama-modal-input';
+
+  const toLabel = row.appendChild(document.createElement('label'));
+  toLabel.textContent = 'To page';
+  const toInput = row.appendChild(document.createElement('input'));
+  toInput.type = 'number';
+  toInput.min = '1';
+  toInput.max = String(totalPages);
+  toInput.value = String(Math.min(totalPages, 14));
+  toInput.className = 'llama-modal-input';
+
+  const warning = modal.appendChild(document.createElement('div'));
+  warning.className = 'llama-modal-warning';
+  warning.textContent = '⚠️ Each page is sent as an image. More pages = larger context. Recommend ≤ 14.';
+
+  const btns = modal.appendChild(document.createElement('div'));
+  btns.className = 'llama-modal-btns';
+
+  const cancelBtn = btns.appendChild(document.createElement('button'));
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.className = 'llama-modal-cancel';
+  cancelBtn.addEventListener('click', () => { overlay.remove(); onCancel(); });
+
+  const confirmBtn = btns.appendChild(document.createElement('button'));
+  confirmBtn.textContent = 'Attach pages';
+  confirmBtn.className = 'llama-modal-confirm';
+  confirmBtn.addEventListener('click', () => {
+    const from = Math.max(1, Math.min(totalPages, parseInt(fromInput.value) || 1));
+    const to = Math.max(from, Math.min(totalPages, parseInt(toInput.value) || totalPages));
+    overlay.remove();
+    onConfirm(from, to);
+  });
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) { overlay.remove(); onCancel(); }
+  });
+
+  document.body.appendChild(overlay);
+  fromInput.focus();
+}
+
 export class ChatView extends ItemView {
   private plugin: LlamaPlugin;
   private messages: ChatMessage[] = [];
@@ -90,6 +163,8 @@ export class ChatView extends ItemView {
   private deleteChatBtn!: HTMLButtonElement;
   private attachInput!: HTMLInputElement;
   private attachmentPreviewEl!: HTMLElement;
+  private mentionDropdown!: HTMLElement;
+  private mentionStart = -1;
 
   constructor(leaf: WorkspaceLeaf, plugin: LlamaPlugin) {
     super(leaf);
@@ -193,14 +268,36 @@ export class ChatView extends ItemView {
       // Auto-grow textarea
       this.inputArea.style.height = 'auto';
       this.inputArea.style.height = Math.min(this.inputArea.scrollHeight, 160) + 'px';
+      this.handleMentionInput();
     });
 
     this.inputArea.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (this.mentionDropdown.style.display !== 'none') {
+        const items = Array.from(this.mentionDropdown.querySelectorAll('.llama-mention-item')) as HTMLElement[];
+        const active = this.mentionDropdown.querySelector('.llama-mention-item.active') as HTMLElement | null;
+        const idx = active ? items.indexOf(active) : -1;
+        if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length]?.classList.add('active'); if (active) active.classList.remove('active'); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); const prev = items[(idx - 1 + items.length) % items.length]; if (active) active.classList.remove('active'); prev?.classList.add('active'); return; }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          const sel = (active || items[0]) as HTMLElement | undefined;
+          if (sel) { e.preventDefault(); sel.click(); return; }
+        }
+        if (e.key === 'Escape') { this.hideMentionDropdown(); return; }
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         if (!this.isStreaming) this.sendMessage();
       }
     });
+
+    this.inputArea.addEventListener('blur', () => {
+      // Delay so click on dropdown items registers first
+      setTimeout(() => this.hideMentionDropdown(), 150);
+    });
+
+    // ── @ Mention dropdown ────────────────────────────────────────────────────
+    this.mentionDropdown = inputBar.createDiv('llama-mention-dropdown');
+    this.mentionDropdown.style.display = 'none';
 
     const btnGroup = inputBar.createDiv('llama-btn-group');
 
@@ -218,25 +315,33 @@ export class ChatView extends ItemView {
         const f = files[i];
         if (f.type === 'application/pdf') {
           try {
-            new Notice(`Processing PDF: ${f.name}...`);
             const pdfjsLib = await getPdfJs();
             const arrayBuffer = await f.arrayBuffer();
             const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+            const totalPages = pdfDoc.numPages;
 
-            const pagesToConvert = Math.min(pdfDoc.numPages, 14);
-            for (let p = 1; p <= pagesToConvert; p++) {
-              const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
-              this.pendingAttachments.push({
-                name: `${f.name} (Page ${p})`,
-                type: 'image/jpeg',
-                dataUrl
-              });
-            }
-            if (pdfDoc.numPages > 14) {
-              new Notice(`Limited ${f.name} to first 14 pages to avoid context overload.`);
-            } else {
-              new Notice(`Finished processing ${f.name}`);
-            }
+            // Show page range selector modal
+            await new Promise<void>((resolve) => {
+              showPdfPageRangeModal(
+                f.name,
+                totalPages,
+                async (from, to) => {
+                  new Notice(`Processing pages ${from}–${to} of ${f.name}…`);
+                  for (let p = from; p <= to; p++) {
+                    const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
+                    this.pendingAttachments.push({
+                      name: `${f.name} (Page ${p})`,
+                      type: 'image/jpeg',
+                      dataUrl
+                    });
+                  }
+                  new Notice(`✅ Loaded ${to - from + 1} pages from ${f.name}`);
+                  this.renderAttachmentPreviews();
+                  resolve();
+                },
+                () => resolve()
+              );
+            });
           } catch (err) {
             console.error('PDF parsing error', err);
             new Notice('Failed to parse PDF pages into images.');
@@ -440,12 +545,44 @@ export class ChatView extends ItemView {
   private buildDisplayMessagesFromHistory(messages: ChatMessage[]): DisplayMessage[] {
     const result: DisplayMessage[] = [];
 
-    for (const msg of messages) {
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
       if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+
+      const content = this.toDisplayText(msg.content);
+      let toolEvents: ToolEvent[] | undefined = undefined;
+
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        toolEvents = [];
+        for (const call of msg.tool_calls) {
+          let resultText = 'done';
+          // Find matching tool_result in subsequent messages
+          for (let j = i + 1; j < messages.length && j <= i + 5; j++) {
+            const nextMsg = messages[j];
+            if (nextMsg.role === 'tool' && nextMsg.tool_call_id === call.id) {
+              const tcContent = this.toDisplayText(nextMsg.content);
+              resultText = tcContent;
+              break;
+            }
+          }
+          toolEvents.push({
+            type: 'end',
+            name: call.function.name,
+            result: resultText
+          });
+        }
+      }
+
+      // Skip completely empty messages
+      if (!content.trim() && (!msg.attachments || msg.attachments.length === 0) && (!toolEvents || toolEvents.length === 0)) {
+        continue;
+      }
+
       result.push({
         role: msg.role,
-        content: this.toDisplayText(msg.content),
+        content: content,
         attachments: msg.attachments,
+        toolEvents
       });
     }
 
@@ -646,10 +783,7 @@ export class ChatView extends ItemView {
   private renderBubble(msg: DisplayMessage, container: HTMLElement): HTMLElement {
     const wrapper = container.createDiv(`llama-msg-wrapper llama-msg-${msg.role}`);
 
-    // Avatar
-    const avatar = wrapper.createDiv('llama-avatar');
-    avatar.textContent = msg.role === 'user' ? '👤' : msg.role === 'error' ? '⚠️' : '🦙';
-
+    // No avatar — clean look
     const bubble = wrapper.createDiv('llama-bubble');
 
     // Tool events (shown above the response text)
@@ -660,6 +794,8 @@ export class ChatView extends ItemView {
         const icons: Record<string, string> = {
           search_vault: '🔍', read_note: '📖', list_folder: '📁',
           append_to_note: '✏️', edit_note: '✏️', create_note: '📄',
+          open_note: '🔗', move_note: '📦', rename_note: '✏️',
+          copy_note: '📋', delete_note: '🗑️', create_folder: '📁',
         };
         const icon = icons[ev.name] ?? '🛠️';
         if (ev.type === 'start') {
@@ -734,6 +870,75 @@ export class ChatView extends ItemView {
     }
 
     return wrapper;
+  }
+
+  // ── @ Mention Autocomplete ─────────────────────────────────────────────────
+
+  private handleMentionInput(): void {
+    const val = this.inputArea.value;
+    const pos = this.inputArea.selectionStart ?? val.length;
+
+    // Find the last '@' before cursor with no spaces breaking it
+    const before = val.slice(0, pos);
+    const atMatch = before.match(/@([^\s@]*)$/);
+
+    if (!atMatch) {
+      this.hideMentionDropdown();
+      return;
+    }
+
+    const query = atMatch[1].toLowerCase();
+    this.mentionStart = before.lastIndexOf('@');
+
+    // Search indexer for matching notes
+    const allNotes = this.plugin.indexer.search(query || '', undefined, 30);
+    const filtered = query
+      ? allNotes.filter(n =>
+          n.path.toLowerCase().includes(query) || n.title.toLowerCase().includes(query)
+        ).slice(0, 8)
+      : allNotes.slice(0, 8);
+
+    if (filtered.length === 0) {
+      this.hideMentionDropdown();
+      return;
+    }
+
+    this.mentionDropdown.empty();
+    this.mentionDropdown.style.display = 'block';
+
+    for (let i = 0; i < filtered.length; i++) {
+      const note = filtered[i];
+      const item = this.mentionDropdown.createDiv('llama-mention-item');
+      if (i === 0) item.classList.add('active');
+
+      const name = item.createSpan('llama-mention-name');
+      name.textContent = note.title;
+      const path = item.createSpan('llama-mention-path');
+      path.textContent = note.path;
+
+      item.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        this.insertMention(note.path);
+      });
+    }
+  }
+
+  private insertMention(notePath: string): void {
+    const val = this.inputArea.value;
+    const pos = this.inputArea.selectionStart ?? val.length;
+    const before = val.slice(0, this.mentionStart);
+    const after = val.slice(pos);
+    const inserted = `[[${notePath}]]`;
+    this.inputArea.value = before + inserted + after;
+    const newCursor = before.length + inserted.length;
+    this.inputArea.setSelectionRange(newCursor, newCursor);
+    this.hideMentionDropdown();
+    this.inputArea.focus();
+  }
+
+  private hideMentionDropdown(): void {
+    this.mentionDropdown.style.display = 'none';
+    this.mentionStart = -1;
   }
 
   private updateLastBubble(msg: DisplayMessage): void {

@@ -15,6 +15,8 @@ export const DEFAULT_SETTINGS: LlamaPluginSettings = {
   showDiffPreview: true,
   diffPreviewThreshold: 200,
   temperature: 0.7,
+  ollamaEmbedEndpoint: 'http://localhost:11434',
+  embeddingModel: '',
 };
 
 export class LlamaSettingTab extends PluginSettingTab {
@@ -188,6 +190,43 @@ export class LlamaSettingTab extends PluginSettingTab {
               .map(p => p.trim())
               .filter(Boolean);
             await this.plugin.saveSettings();
+          })
+      );
+
+    // ── Semantic Embeddings ──────────────────────────────────────────
+    containerEl.createEl('h3', { text: '🧠 Semantic Embeddings (optional)' });
+
+    containerEl.createEl('p', {
+      text: 'When enabled, notes are embedded using Ollama and a vector similarity search replaces the keyword-only ranking. ' +
+            'This means only the most relevant notes are injected into context — scaling gracefully to 200+ note vaults. ' +
+            'Requires Ollama running locally with a text-embedding model (e.g. \'nomic-embed-text\').'
+    }).style.cssText = 'font-size: 12px; color: var(--text-muted); margin: 0 0 8px;';
+
+    new Setting(containerEl)
+      .setName('Ollama Embeddings URL')
+      .setDesc('Base URL of your Ollama instance (default: http://localhost:11434)')
+      .addText(text =>
+        text
+          .setPlaceholder('http://localhost:11434')
+          .setValue(this.plugin.settings.ollamaEmbedEndpoint)
+          .onChange(async value => {
+            this.plugin.settings.ollamaEmbedEndpoint = value.replace(/\/$/, '') || 'http://localhost:11434';
+            await this.plugin.saveSettings();
+            this.plugin.embeddingIndex.updateSettings(this.plugin.settings);
+          })
+      );
+
+    new Setting(containerEl)
+      .setName('Embedding model')
+      .setDesc('Ollama model name for embeddings (leave blank to disable). Example: nomic-embed-text, mxbai-embed-large')
+      .addText(text =>
+        text
+          .setPlaceholder('nomic-embed-text')
+          .setValue(this.plugin.settings.embeddingModel)
+          .onChange(async value => {
+            this.plugin.settings.embeddingModel = value.trim();
+            await this.plugin.saveSettings();
+            this.plugin.embeddingIndex.updateSettings(this.plugin.settings);
           })
       );
 

@@ -71,6 +71,65 @@ function renderPdfPageToDataUrl(pdfDoc, pageNum) {
   });
 }
 var LLAMA_CHAT_VIEW_TYPE = "llama-chat-view";
+function showPdfPageRangeModal(fileName, totalPages, onConfirm, onCancel) {
+  const overlay = document.createElement("div");
+  overlay.className = "llama-modal-overlay";
+  const modal = overlay.appendChild(document.createElement("div"));
+  modal.className = "llama-modal";
+  const title = modal.appendChild(document.createElement("div"));
+  title.className = "llama-modal-title";
+  title.textContent = `\u{1F4C4} PDF: ${fileName}`;
+  const subtitle = modal.appendChild(document.createElement("div"));
+  subtitle.className = "llama-modal-subtitle";
+  subtitle.textContent = `${totalPages} pages \u2014 select which pages to send`;
+  const row = modal.appendChild(document.createElement("div"));
+  row.className = "llama-modal-row";
+  const fromLabel = row.appendChild(document.createElement("label"));
+  fromLabel.textContent = "From page";
+  const fromInput = row.appendChild(document.createElement("input"));
+  fromInput.type = "number";
+  fromInput.min = "1";
+  fromInput.max = String(totalPages);
+  fromInput.value = "1";
+  fromInput.className = "llama-modal-input";
+  const toLabel = row.appendChild(document.createElement("label"));
+  toLabel.textContent = "To page";
+  const toInput = row.appendChild(document.createElement("input"));
+  toInput.type = "number";
+  toInput.min = "1";
+  toInput.max = String(totalPages);
+  toInput.value = String(Math.min(totalPages, 14));
+  toInput.className = "llama-modal-input";
+  const warning = modal.appendChild(document.createElement("div"));
+  warning.className = "llama-modal-warning";
+  warning.textContent = "\u26A0\uFE0F Each page is sent as an image. More pages = larger context. Recommend \u2264 14.";
+  const btns = modal.appendChild(document.createElement("div"));
+  btns.className = "llama-modal-btns";
+  const cancelBtn = btns.appendChild(document.createElement("button"));
+  cancelBtn.textContent = "Cancel";
+  cancelBtn.className = "llama-modal-cancel";
+  cancelBtn.addEventListener("click", () => {
+    overlay.remove();
+    onCancel();
+  });
+  const confirmBtn = btns.appendChild(document.createElement("button"));
+  confirmBtn.textContent = "Attach pages";
+  confirmBtn.className = "llama-modal-confirm";
+  confirmBtn.addEventListener("click", () => {
+    const from = Math.max(1, Math.min(totalPages, parseInt(fromInput.value) || 1));
+    const to = Math.max(from, Math.min(totalPages, parseInt(toInput.value) || totalPages));
+    overlay.remove();
+    onConfirm(from, to);
+  });
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) {
+      overlay.remove();
+      onCancel();
+    }
+  });
+  document.body.appendChild(overlay);
+  fromInput.focus();
+}
 var ChatView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -79,6 +138,7 @@ var ChatView = class extends import_obsidian.ItemView {
     this.currentChatId = "";
     this.isStreaming = false;
     this.pendingAttachments = [];
+    this.mentionStart = -1;
     this.plugin = plugin;
   }
   getViewType() {
@@ -158,14 +218,53 @@ var ChatView = class extends import_obsidian.ItemView {
     this.inputArea.addEventListener("input", () => {
       this.inputArea.style.height = "auto";
       this.inputArea.style.height = Math.min(this.inputArea.scrollHeight, 160) + "px";
+      this.handleMentionInput();
     });
     this.inputArea.addEventListener("keydown", (e) => {
+      var _a2;
+      if (this.mentionDropdown.style.display !== "none") {
+        const items = Array.from(this.mentionDropdown.querySelectorAll(".llama-mention-item"));
+        const active = this.mentionDropdown.querySelector(".llama-mention-item.active");
+        const idx = active ? items.indexOf(active) : -1;
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          (_a2 = items[(idx + 1) % items.length]) == null ? void 0 : _a2.classList.add("active");
+          if (active)
+            active.classList.remove("active");
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          const prev = items[(idx - 1 + items.length) % items.length];
+          if (active)
+            active.classList.remove("active");
+          prev == null ? void 0 : prev.classList.add("active");
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          const sel = active || items[0];
+          if (sel) {
+            e.preventDefault();
+            sel.click();
+            return;
+          }
+        }
+        if (e.key === "Escape") {
+          this.hideMentionDropdown();
+          return;
+        }
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         if (!this.isStreaming)
           this.sendMessage();
       }
     });
+    this.inputArea.addEventListener("blur", () => {
+      setTimeout(() => this.hideMentionDropdown(), 150);
+    });
+    this.mentionDropdown = inputBar.createDiv("llama-mention-dropdown");
+    this.mentionDropdown.style.display = "none";
     const btnGroup = inputBar.createDiv("llama-btn-group");
     const attachBtn = btnGroup.createEl("button", { cls: "llama-attach-btn", title: "Attach files" });
     (0, import_obsidian.setIcon)(attachBtn, "paperclip");
@@ -180,24 +279,31 @@ var ChatView = class extends import_obsidian.ItemView {
         const f = files[i];
         if (f.type === "application/pdf") {
           try {
-            new import_obsidian.Notice(`Processing PDF: ${f.name}...`);
             const pdfjsLib = await getPdfJs();
             const arrayBuffer = await f.arrayBuffer();
             const pdfDoc = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
-            const pagesToConvert = Math.min(pdfDoc.numPages, 14);
-            for (let p = 1; p <= pagesToConvert; p++) {
-              const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
-              this.pendingAttachments.push({
-                name: `${f.name} (Page ${p})`,
-                type: "image/jpeg",
-                dataUrl
-              });
-            }
-            if (pdfDoc.numPages > 14) {
-              new import_obsidian.Notice(`Limited ${f.name} to first 14 pages to avoid context overload.`);
-            } else {
-              new import_obsidian.Notice(`Finished processing ${f.name}`);
-            }
+            const totalPages = pdfDoc.numPages;
+            await new Promise((resolve) => {
+              showPdfPageRangeModal(
+                f.name,
+                totalPages,
+                async (from, to) => {
+                  new import_obsidian.Notice(`Processing pages ${from}\u2013${to} of ${f.name}\u2026`);
+                  for (let p = from; p <= to; p++) {
+                    const dataUrl = await renderPdfPageToDataUrl(pdfDoc, p);
+                    this.pendingAttachments.push({
+                      name: `${f.name} (Page ${p})`,
+                      type: "image/jpeg",
+                      dataUrl
+                    });
+                  }
+                  new import_obsidian.Notice(`\u2705 Loaded ${to - from + 1} pages from ${f.name}`);
+                  this.renderAttachmentPreviews();
+                  resolve();
+                },
+                () => resolve()
+              );
+            });
           } catch (err) {
             console.error("PDF parsing error", err);
             new import_obsidian.Notice("Failed to parse PDF pages into images.");
@@ -375,13 +481,39 @@ var ChatView = class extends import_obsidian.ItemView {
   }
   buildDisplayMessagesFromHistory(messages) {
     const result = [];
-    for (const msg of messages) {
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
       if (msg.role !== "user" && msg.role !== "assistant")
         continue;
+      const content = this.toDisplayText(msg.content);
+      let toolEvents = void 0;
+      if (msg.tool_calls && msg.tool_calls.length > 0) {
+        toolEvents = [];
+        for (const call of msg.tool_calls) {
+          let resultText = "done";
+          for (let j = i + 1; j < messages.length && j <= i + 5; j++) {
+            const nextMsg = messages[j];
+            if (nextMsg.role === "tool" && nextMsg.tool_call_id === call.id) {
+              const tcContent = this.toDisplayText(nextMsg.content);
+              resultText = tcContent;
+              break;
+            }
+          }
+          toolEvents.push({
+            type: "end",
+            name: call.function.name,
+            result: resultText
+          });
+        }
+      }
+      if (!content.trim() && (!msg.attachments || msg.attachments.length === 0) && (!toolEvents || toolEvents.length === 0)) {
+        continue;
+      }
       result.push({
         role: msg.role,
-        content: this.toDisplayText(msg.content),
-        attachments: msg.attachments
+        content,
+        attachments: msg.attachments,
+        toolEvents
       });
     }
     return result;
@@ -552,8 +684,6 @@ var ChatView = class extends import_obsidian.ItemView {
   renderBubble(msg, container) {
     var _a;
     const wrapper = container.createDiv(`llama-msg-wrapper llama-msg-${msg.role}`);
-    const avatar = wrapper.createDiv("llama-avatar");
-    avatar.textContent = msg.role === "user" ? "\u{1F464}" : msg.role === "error" ? "\u26A0\uFE0F" : "\u{1F999}";
     const bubble = wrapper.createDiv("llama-bubble");
     if (msg.toolEvents && msg.toolEvents.length > 0) {
       const toolsEl = bubble.createDiv("llama-tool-events");
@@ -565,7 +695,13 @@ var ChatView = class extends import_obsidian.ItemView {
           list_folder: "\u{1F4C1}",
           append_to_note: "\u270F\uFE0F",
           edit_note: "\u270F\uFE0F",
-          create_note: "\u{1F4C4}"
+          create_note: "\u{1F4C4}",
+          open_note: "\u{1F517}",
+          move_note: "\u{1F4E6}",
+          rename_note: "\u270F\uFE0F",
+          copy_note: "\u{1F4CB}",
+          delete_note: "\u{1F5D1}\uFE0F",
+          create_folder: "\u{1F4C1}"
         };
         const icon = (_a = icons[ev.name]) != null ? _a : "\u{1F6E0}\uFE0F";
         if (ev.type === "start") {
@@ -625,6 +761,61 @@ var ChatView = class extends import_obsidian.ItemView {
       }
     }
     return wrapper;
+  }
+  // ── @ Mention Autocomplete ─────────────────────────────────────────────────
+  handleMentionInput() {
+    var _a;
+    const val = this.inputArea.value;
+    const pos = (_a = this.inputArea.selectionStart) != null ? _a : val.length;
+    const before = val.slice(0, pos);
+    const atMatch = before.match(/@([^\s@]*)$/);
+    if (!atMatch) {
+      this.hideMentionDropdown();
+      return;
+    }
+    const query = atMatch[1].toLowerCase();
+    this.mentionStart = before.lastIndexOf("@");
+    const allNotes = this.plugin.indexer.search(query || "", void 0, 30);
+    const filtered = query ? allNotes.filter(
+      (n) => n.path.toLowerCase().includes(query) || n.title.toLowerCase().includes(query)
+    ).slice(0, 8) : allNotes.slice(0, 8);
+    if (filtered.length === 0) {
+      this.hideMentionDropdown();
+      return;
+    }
+    this.mentionDropdown.empty();
+    this.mentionDropdown.style.display = "block";
+    for (let i = 0; i < filtered.length; i++) {
+      const note = filtered[i];
+      const item = this.mentionDropdown.createDiv("llama-mention-item");
+      if (i === 0)
+        item.classList.add("active");
+      const name = item.createSpan("llama-mention-name");
+      name.textContent = note.title;
+      const path = item.createSpan("llama-mention-path");
+      path.textContent = note.path;
+      item.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        this.insertMention(note.path);
+      });
+    }
+  }
+  insertMention(notePath) {
+    var _a;
+    const val = this.inputArea.value;
+    const pos = (_a = this.inputArea.selectionStart) != null ? _a : val.length;
+    const before = val.slice(0, this.mentionStart);
+    const after = val.slice(pos);
+    const inserted = `[[${notePath}]]`;
+    this.inputArea.value = before + inserted + after;
+    const newCursor = before.length + inserted.length;
+    this.inputArea.setSelectionRange(newCursor, newCursor);
+    this.hideMentionDropdown();
+    this.inputArea.focus();
+  }
+  hideMentionDropdown() {
+    this.mentionDropdown.style.display = "none";
+    this.mentionStart = -1;
   }
   updateLastBubble(msg) {
     const wrappers = this.messagesContainer.querySelectorAll(".llama-msg-wrapper");
@@ -1108,6 +1299,163 @@ var VaultIndexer = class {
   }
 };
 
+// src/embeddings.ts
+function cosine(a, b) {
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+var EMBED_INDEX_VERSION = 1;
+var EmbeddingIndex = class {
+  constructor(app, settings) {
+    this.app = app;
+    this.settings = settings;
+    this.entries = [];
+    this.ready = false;
+    this.ollamaEndpoint = "http://localhost:11434";
+    this.model = "";
+    var _a, _b;
+    this.ollamaEndpoint = (_a = settings.ollamaEmbedEndpoint) != null ? _a : "http://localhost:11434";
+    this.model = (_b = settings.embeddingModel) != null ? _b : "";
+  }
+  get isReady() {
+    return this.ready && this.model !== "";
+  }
+  get entryCount() {
+    return this.entries.length;
+  }
+  updateSettings(settings) {
+    var _a, _b;
+    this.settings = settings;
+    this.ollamaEndpoint = (_a = settings.ollamaEmbedEndpoint) != null ? _a : "http://localhost:11434";
+    this.model = (_b = settings.embeddingModel) != null ? _b : "";
+  }
+  /** Load saved index and incrementally update changed files */
+  async build(savedData, getContent) {
+    if (!this.model) {
+      this.entries = [];
+      this.ready = false;
+      return;
+    }
+    const files = this.app.vault.getMarkdownFiles();
+    const saved = /* @__PURE__ */ new Map();
+    if (savedData && savedData.version === EMBED_INDEX_VERSION && savedData.model === this.model) {
+      for (const e of savedData.entries) {
+        saved.set(e.path, e);
+      }
+    }
+    const result = [];
+    for (const file of files) {
+      const existing = saved.get(file.path);
+      if (existing && existing.mtime === file.stat.mtime) {
+        result.push(existing);
+      } else {
+        try {
+          const content = await getContent(file.path);
+          if (!content)
+            continue;
+          const text = `${file.basename}
+
+${content}`.slice(0, 4e3);
+          const vector = await this.fetchEmbedding(text);
+          if (vector) {
+            result.push({ path: file.path, mtime: file.stat.mtime, vector });
+          }
+        } catch (e) {
+        }
+      }
+    }
+    this.entries = result;
+    this.ready = true;
+  }
+  /** Embed a single file (called after edits) */
+  async embedFile(file, content) {
+    if (!this.model)
+      return;
+    try {
+      const text = `${file.basename}
+
+${content}`.slice(0, 4e3);
+      const vector = await this.fetchEmbedding(text);
+      if (!vector)
+        return;
+      const existing = this.entries.findIndex((e) => e.path === file.path);
+      const entry = { path: file.path, mtime: file.stat.mtime, vector };
+      if (existing >= 0) {
+        this.entries[existing] = entry;
+      } else {
+        this.entries.push(entry);
+      }
+    } catch (e) {
+    }
+  }
+  /** Remove a file entry */
+  removeFile(path) {
+    this.entries = this.entries.filter((e) => e.path !== path);
+  }
+  /** Rename a file's path */
+  renameFile(oldPath, newPath, newMtime) {
+    const entry = this.entries.find((e) => e.path === oldPath);
+    if (entry) {
+      entry.path = newPath;
+      entry.mtime = newMtime;
+    }
+  }
+  /**
+   * Semantic similarity search.
+   * Returns the top-N paths ranked by cosine similarity to the query.
+   */
+  async search(query, limit) {
+    if (!this.isReady || this.entries.length === 0)
+      return [];
+    const qVec = await this.fetchEmbedding(query.slice(0, 1e3));
+    if (!qVec)
+      return [];
+    const scored = this.entries.map((e) => ({
+      path: e.path,
+      score: cosine(qVec, e.vector)
+    }));
+    return scored.sort((a, b) => b.score - a.score).slice(0, limit).filter((s) => s.score > 0.25).map((s) => s.path);
+  }
+  /** Serialise for persistence */
+  toJSON() {
+    return {
+      version: EMBED_INDEX_VERSION,
+      model: this.model,
+      entries: this.entries
+    };
+  }
+  // ── Private ────────────────────────────────────────────────────────────────
+  async fetchEmbedding(text) {
+    if (!this.model)
+      return null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15e3);
+    try {
+      const base = this.ollamaEndpoint.replace(/\/$/, "");
+      const resp = await fetch(`${base}/api/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: this.model, prompt: text }),
+        signal: ctrl.signal
+      });
+      clearTimeout(timer);
+      if (!resp.ok)
+        return null;
+      const data = await resp.json();
+      return Array.isArray(data == null ? void 0 : data.embedding) ? data.embedding : null;
+    } catch (e) {
+      clearTimeout(timer);
+      return null;
+    }
+  }
+};
+
 // src/tools.ts
 var import_obsidian3 = require("obsidian");
 var TOOL_DEFINITIONS = [
@@ -1260,6 +1608,80 @@ var TOOL_DEFINITIONS = [
         required: ["paths"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "move_note",
+      description: "Move a note (or any file) from one vault path to another. Can be used to reorganize files across folders.",
+      parameters: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: 'Current vault-relative path of the note, e.g. "Inbox/Note.md"' },
+          destination: { type: "string", description: 'New vault-relative path including filename, e.g. "Projects/Note.md"' }
+        },
+        required: ["source", "destination"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "rename_note",
+      description: "Rename a note within the same folder. Only changes the filename, not the folder.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Current vault-relative path of the note" },
+          new_name: { type: "string", description: 'New filename (with .md extension), e.g. "BetterTitle.md"' }
+        },
+        required: ["path", "new_name"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "copy_note",
+      description: "Copy a note to a new path. The original is left unchanged.",
+      parameters: {
+        type: "object",
+        properties: {
+          source: { type: "string", description: "Vault-relative path of the note to copy" },
+          destination: { type: "string", description: "Vault-relative path for the new copy, including filename" }
+        },
+        required: ["source", "destination"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_note",
+      description: "Permanently delete a note from the vault. Use with caution \u2014 this cannot be undone via the undo stack.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Vault-relative path of the note to delete" },
+          confirm: { type: "boolean", description: "Must be true to proceed with deletion" }
+        },
+        required: ["path", "confirm"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_folder",
+      description: "Create a new folder (directory) in the vault. Creates all intermediate parent folders as needed.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: 'Vault-relative folder path to create, e.g. "Projects/2024/Q1"' }
+        },
+        required: ["path"]
+      }
+    }
   }
 ];
 var TOOL_INJECTION_PROMPT = `
@@ -1273,6 +1695,11 @@ Available tools:
 - edit_note(path, mode, old_text?, new_text?, new_content?): Edit a note
 - create_note(path, content, overwrite?): Create a new note
 - open_note(paths): Open one or more notes in editor tabs
+- move_note(source, destination): Move a note to a new path
+- rename_note(path, new_name): Rename a note (same folder)
+- copy_note(source, destination): Copy a note to a new path
+- delete_note(path, confirm): Delete a note permanently (confirm must be true)
+- create_folder(path): Create a new folder
 
 Format:
 <tool_call>
@@ -1313,6 +1740,16 @@ var ToolExecutor = class {
           return await this.toolCreateNote(args);
         case "open_note":
           return await this.toolOpenNote(args);
+        case "move_note":
+          return await this.toolMoveNote(args);
+        case "rename_note":
+          return await this.toolRenameNote(args);
+        case "copy_note":
+          return await this.toolCopyNote(args);
+        case "delete_note":
+          return await this.toolDeleteNote(args);
+        case "create_folder":
+          return await this.toolCreateFolder(args);
         default:
           return `Error: Unknown tool "${name}"`;
       }
@@ -1512,6 +1949,121 @@ ${oldText}
     const report = opened.map((p) => `"${p}"`).join(", ");
     const missingReport = missing.length > 0 ? ` (not found: ${missing.map((p) => `"${p}"`).join(", ")})` : "";
     return `\u2705 Opened ${opened.length} note(s): ${report}${missingReport}`;
+  }
+  async toolMoveNote(args) {
+    if (this.settings.editPermission === "read_only") {
+      return "Error: Edit permission is set to read-only. Change it in plugin settings.";
+    }
+    const source = this.validatePath(args.source);
+    const destination = this.validatePath(args.destination);
+    if (!source)
+      return "Error: Invalid or missing source path";
+    if (!destination)
+      return "Error: Invalid or missing destination path";
+    const file = this.app.vault.getAbstractFileByPath(source);
+    if (!file)
+      return `Error: File not found: ${source}`;
+    const destFolder = destination.includes("/") ? destination.substring(0, destination.lastIndexOf("/")) : "";
+    if (destFolder) {
+      const folderExists = this.app.vault.getAbstractFileByPath(destFolder);
+      if (!folderExists) {
+        await this.app.vault.createFolder(destFolder);
+      }
+    }
+    await this.app.fileManager.renameFile(file, destination);
+    const newFile = this.app.vault.getAbstractFileByPath(destination);
+    if (newFile instanceof import_obsidian3.TFile)
+      await this.indexer.updateFile(newFile);
+    this.indexer.removeFile(source);
+    return `\u2705 Moved "${source}" \u2192 "${destination}"`;
+  }
+  async toolRenameNote(args) {
+    var _a;
+    if (this.settings.editPermission === "read_only") {
+      return "Error: Edit permission is set to read-only. Change it in plugin settings.";
+    }
+    const path = this.validatePath(args.path);
+    const newName = String((_a = args.new_name) != null ? _a : "").trim();
+    if (!path)
+      return "Error: Invalid or missing path";
+    if (!newName)
+      return "Error: Invalid or missing new_name";
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file)
+      return `Error: File not found: ${path}`;
+    const parentFolder = path.includes("/") ? path.substring(0, path.lastIndexOf("/") + 1) : "";
+    const newPath = parentFolder + newName;
+    await this.app.fileManager.renameFile(file, newPath);
+    const newFile = this.app.vault.getAbstractFileByPath(newPath);
+    if (newFile instanceof import_obsidian3.TFile)
+      await this.indexer.updateFile(newFile);
+    this.indexer.removeFile(path);
+    return `\u2705 Renamed "${path}" \u2192 "${newPath}"`;
+  }
+  async toolCopyNote(args) {
+    if (this.settings.editPermission === "read_only") {
+      return "Error: Edit permission is set to read-only. Change it in plugin settings.";
+    }
+    const source = this.validatePath(args.source);
+    const destination = this.validatePath(args.destination);
+    if (!source)
+      return "Error: Invalid or missing source path";
+    if (!destination)
+      return "Error: Invalid or missing destination path";
+    const file = this.app.vault.getAbstractFileByPath(source);
+    if (!(file instanceof import_obsidian3.TFile))
+      return `Error: Note not found: ${source}`;
+    const content = await this.app.vault.read(file);
+    const destFolder = destination.includes("/") ? destination.substring(0, destination.lastIndexOf("/")) : "";
+    if (destFolder) {
+      const folderExists = this.app.vault.getAbstractFileByPath(destFolder);
+      if (!folderExists) {
+        await this.app.vault.createFolder(destFolder);
+      }
+    }
+    const existingDest = this.app.vault.getAbstractFileByPath(destination);
+    if (existingDest)
+      return `Error: Destination already exists: ${destination}. Choose a different path.`;
+    await this.app.vault.create(destination, content);
+    const newFile = this.app.vault.getAbstractFileByPath(destination);
+    if (newFile instanceof import_obsidian3.TFile)
+      await this.indexer.updateFile(newFile);
+    return `\u2705 Copied "${source}" \u2192 "${destination}"`;
+  }
+  async toolDeleteNote(args) {
+    if (this.settings.editPermission !== "full_edit") {
+      return 'Error: Deleting notes requires "full_edit" permission in plugin settings.';
+    }
+    const path = this.validatePath(args.path);
+    if (!path)
+      return "Error: Invalid or missing path";
+    if (!args.confirm)
+      return "Error: confirm must be set to true to delete a note.";
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file)
+      return `Error: File not found: ${path}`;
+    if (file instanceof import_obsidian3.TFile) {
+      const content = await this.app.vault.read(file);
+      this.pushUndo(path, content, `delete ${path}`);
+    }
+    await this.app.vault.trash(file, true);
+    this.indexer.removeFile(path);
+    return `\u2705 Deleted "${path}" (moved to system trash)`;
+  }
+  async toolCreateFolder(args) {
+    if (this.settings.editPermission === "read_only") {
+      return "Error: Edit permission is set to read-only. Change it in plugin settings.";
+    }
+    const path = this.validatePath(args.path);
+    if (!path)
+      return "Error: Invalid or missing path";
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof import_obsidian3.TFolder)
+      return `Error: Folder already exists: ${path}`;
+    if (existing)
+      return `Error: A file exists at that path: ${path}`;
+    await this.app.vault.createFolder(path);
+    return `\u2705 Created folder "${path}"`;
   }
   // ── Helpers ───────────────────────────────────────────────────────────────
   validatePath(raw) {
@@ -1780,8 +2332,9 @@ function getAdaptiveAutoInjectCount(userMessage, configuredCount) {
   return requested;
 }
 var ContextBuilder = class {
-  constructor(indexer, settings) {
+  constructor(indexer, embeddingIndex, settings) {
     this.indexer = indexer;
+    this.embeddingIndex = embeddingIndex;
     this.settings = settings;
   }
   updateSettings(settings) {
@@ -1833,14 +2386,20 @@ The following notes exist in the vault (excluded: ${this.indexer.excludedCount})
     const injectedNotes = [];
     if (this.settings.autoInjectNotes > 0 && remainingBudget > 200 && userMessage.trim()) {
       const adaptiveCount = getAdaptiveAutoInjectCount(userMessage, this.settings.autoInjectNotes);
-      const topNotes = adaptiveCount > 0 ? this.indexer.getTopNotes(userMessage, adaptiveCount) : [];
+      let notePaths = [];
+      if (this.embeddingIndex.isReady) {
+        notePaths = await this.embeddingIndex.search(userMessage, adaptiveCount);
+      } else if (adaptiveCount > 0) {
+        const topNotes = this.indexer.getTopNotes(userMessage, adaptiveCount);
+        notePaths = topNotes.map((m) => m.path);
+      }
       let usedTokens = 0;
-      for (const meta of topNotes) {
-        const content = await this.indexer.readNote(meta.path);
+      for (const notePath of notePaths) {
+        const content = await this.indexer.readNote(notePath);
         if (!content)
           continue;
         const noteSection = `
-### Note: ${meta.path}
+### Note: ${notePath}
 ${content}`;
         const noteTokens = estimateTokens(noteSection);
         if (usedTokens + noteTokens > remainingBudget)
@@ -1883,7 +2442,9 @@ var DEFAULT_SETTINGS = {
   maxToolCallDepth: 10,
   showDiffPreview: true,
   diffPreviewThreshold: 200,
-  temperature: 0.7
+  temperature: 0.7,
+  ollamaEmbedEndpoint: "http://localhost:11434",
+  embeddingModel: ""
 };
 var LlamaSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
@@ -1963,6 +2524,24 @@ var LlamaSettingTab = class extends import_obsidian4.PluginSettingTab {
       (text) => text.setPlaceholder("Private/**, Diary/**, *.secret.md").setValue(this.plugin.settings.excludePatterns.join(", ")).onChange(async (value) => {
         this.plugin.settings.excludePatterns = value.split(",").map((p) => p.trim()).filter(Boolean);
         await this.plugin.saveSettings();
+      })
+    );
+    containerEl.createEl("h3", { text: "\u{1F9E0} Semantic Embeddings (optional)" });
+    containerEl.createEl("p", {
+      text: "When enabled, notes are embedded using Ollama and a vector similarity search replaces the keyword-only ranking. This means only the most relevant notes are injected into context \u2014 scaling gracefully to 200+ note vaults. Requires Ollama running locally with a text-embedding model (e.g. 'nomic-embed-text')."
+    }).style.cssText = "font-size: 12px; color: var(--text-muted); margin: 0 0 8px;";
+    new import_obsidian4.Setting(containerEl).setName("Ollama Embeddings URL").setDesc("Base URL of your Ollama instance (default: http://localhost:11434)").addText(
+      (text) => text.setPlaceholder("http://localhost:11434").setValue(this.plugin.settings.ollamaEmbedEndpoint).onChange(async (value) => {
+        this.plugin.settings.ollamaEmbedEndpoint = value.replace(/\/$/, "") || "http://localhost:11434";
+        await this.plugin.saveSettings();
+        this.plugin.embeddingIndex.updateSettings(this.plugin.settings);
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("Embedding model").setDesc("Ollama model name for embeddings (leave blank to disable). Example: nomic-embed-text, mxbai-embed-large").addText(
+      (text) => text.setPlaceholder("nomic-embed-text").setValue(this.plugin.settings.embeddingModel).onChange(async (value) => {
+        this.plugin.settings.embeddingModel = value.trim();
+        await this.plugin.saveSettings();
+        this.plugin.embeddingIndex.updateSettings(this.plugin.settings);
       })
     );
     containerEl.createEl("h3", { text: "\u{1F6E1}\uFE0F Edit Safety" });
@@ -2081,19 +2660,28 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
   // ── Services ───────────────────────────────────────────────────────────────
   initServices() {
     this.indexer = new VaultIndexer(this.app, this.settings);
+    this.embeddingIndex = new EmbeddingIndex(this.app, this.settings);
     this.llmClient = new LLMClient(this.settings);
     this.toolExecutor = new ToolExecutor(this.app, this.indexer, this.settings);
-    this.contextBuilder = new ContextBuilder(this.indexer, this.settings);
+    this.contextBuilder = new ContextBuilder(this.indexer, this.embeddingIndex, this.settings);
   }
   // ── Vault Indexing ─────────────────────────────────────────────────────────
   async buildIndexInBackground() {
-    var _a;
+    var _a, _b;
     const data = await this.loadData();
     const savedIndex = (_a = data == null ? void 0 : data.index) != null ? _a : null;
+    const savedEmbeds = (_b = data == null ? void 0 : data.embeddings) != null ? _b : null;
     try {
       await this.indexer.build(savedIndex);
-      await this.persistIndex();
       console.log(`[LLAMA Chat] Vault indexed: ${this.indexer.noteCount} notes`);
+      if (this.settings.embeddingModel) {
+        await this.embeddingIndex.build(
+          savedEmbeds,
+          (path) => this.indexer.readNote(path)
+        );
+        console.log(`[LLAMA Chat] Embeddings: ${this.embeddingIndex.entryCount} notes embedded`);
+      }
+      await this.persistIndex();
     } catch (e) {
       console.error("[LLAMA Chat] Indexing error:", e);
     }
@@ -2101,13 +2689,24 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
   async persistIndex() {
     var _a;
     const existing = (_a = await this.loadData()) != null ? _a : {};
-    await this.saveData({ ...existing, index: this.indexer.getSerializable() });
+    const update = {
+      ...existing,
+      index: this.indexer.getSerializable()
+    };
+    if (this.embeddingIndex.isReady) {
+      update.embeddings = this.embeddingIndex.toJSON();
+    }
+    await this.saveData(update);
   }
   async rebuildIndex() {
     new import_obsidian5.Notice("\u{1F999} Re-indexing vault\u2026");
     await this.indexer.build(null);
+    if (this.settings.embeddingModel) {
+      new import_obsidian5.Notice("\u{1F999} Building embeddings (this may take a minute)\u2026");
+      await this.embeddingIndex.build(null, (path) => this.indexer.readNote(path));
+    }
     await this.persistIndex();
-    new import_obsidian5.Notice(`\u{1F999} Vault indexed: ${this.indexer.noteCount} notes`);
+    new import_obsidian5.Notice(`\u{1F999} Vault indexed: ${this.indexer.noteCount} notes${this.embeddingIndex.isReady ? `, ${this.embeddingIndex.entryCount} embedded` : ""}`);
   }
   // ── Vault Event Handlers ───────────────────────────────────────────────────
   registerVaultEvents() {
@@ -2115,6 +2714,11 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
       this.app.vault.on("create", async (file) => {
         if (file instanceof import_obsidian5.TFile && file.extension === "md") {
           await this.indexer.updateFile(file);
+          if (this.settings.embeddingModel) {
+            const content = await this.indexer.readNote(file.path);
+            if (content)
+              this.embeddingIndex.embedFile(file, content);
+          }
           this.schedulePersist();
         }
       })
@@ -2123,6 +2727,11 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
       this.app.vault.on("modify", async (file) => {
         if (file instanceof import_obsidian5.TFile && file.extension === "md") {
           await this.indexer.updateFile(file);
+          if (this.settings.embeddingModel) {
+            const content = await this.indexer.readNote(file.path);
+            if (content)
+              this.embeddingIndex.embedFile(file, content);
+          }
           this.schedulePersist();
         }
       })
@@ -2131,6 +2740,7 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
       this.app.vault.on("delete", (file) => {
         if (file instanceof import_obsidian5.TFile && file.extension === "md") {
           this.indexer.removeFile(file.path);
+          this.embeddingIndex.removeFile(file.path);
           this.schedulePersist();
         }
       })
@@ -2139,6 +2749,7 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
       this.app.vault.on("rename", async (file, oldPath) => {
         if (file instanceof import_obsidian5.TFile && file.extension === "md") {
           await this.indexer.renameFile(file, oldPath);
+          this.embeddingIndex.renameFile(oldPath, file.path, file.stat.mtime);
           this.schedulePersist();
         }
       })

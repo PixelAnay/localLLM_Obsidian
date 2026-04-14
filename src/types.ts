@@ -68,6 +68,10 @@ export interface LlamaPluginSettings {
   showDiffPreview: boolean;
   diffPreviewThreshold: number;
   temperature: number;
+  /** Ollama base URL used for embeddings (may differ from LLM endpoint) */
+  ollamaEmbedEndpoint: string;
+  /** Ollama model name to use for embeddings, e.g. "nomic-embed-text". Leave blank to disable. */
+  embeddingModel: string;
 }
 
 // ─── Persisted Chat History Types ───────────────────────────────────────────

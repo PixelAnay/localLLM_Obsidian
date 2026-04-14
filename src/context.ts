@@ -1,4 +1,5 @@
 import type { VaultIndexer } from './indexer';
+import type { EmbeddingIndex } from './embeddings';
 import type { ChatMessage, LlamaPluginSettings } from './types';
 import { TOOL_INJECTION_PROMPT } from './tools';
 
@@ -49,7 +50,11 @@ function getAdaptiveAutoInjectCount(userMessage: string, configuredCount: number
 }
 
 export class ContextBuilder {
-  constructor(private indexer: VaultIndexer, private settings: LlamaPluginSettings) {}
+  constructor(
+    private indexer: VaultIndexer,
+    private embeddingIndex: EmbeddingIndex,
+    private settings: LlamaPluginSettings
+  ) {}
 
   updateSettings(settings: LlamaPluginSettings): void {
     this.settings = settings;
@@ -114,14 +119,24 @@ export class ContextBuilder {
     const injectedNotes: string[] = [];
     if (this.settings.autoInjectNotes > 0 && remainingBudget > 200 && userMessage.trim()) {
       const adaptiveCount = getAdaptiveAutoInjectCount(userMessage, this.settings.autoInjectNotes);
-      const topNotes = adaptiveCount > 0 ? this.indexer.getTopNotes(userMessage, adaptiveCount) : [];
+
+      let notePaths: string[] = [];
+
+      // Use semantic search when available, fall back to keyword ranking
+      if (this.embeddingIndex.isReady) {
+        notePaths = await this.embeddingIndex.search(userMessage, adaptiveCount);
+      } else if (adaptiveCount > 0) {
+        const topNotes = this.indexer.getTopNotes(userMessage, adaptiveCount);
+        notePaths = topNotes.map(m => m.path);
+      }
+
       let usedTokens = 0;
 
-      for (const meta of topNotes) {
-        const content = await this.indexer.readNote(meta.path);
+      for (const notePath of notePaths) {
+        const content = await this.indexer.readNote(notePath);
         if (!content) continue;
 
-        const noteSection = `\n### Note: ${meta.path}\n${content}`;
+        const noteSection = `\n### Note: ${notePath}\n${content}`;
         const noteTokens = estimateTokens(noteSection);
 
         if (usedTokens + noteTokens > remainingBudget) break;

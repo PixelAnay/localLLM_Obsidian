@@ -1,4 +1,4 @@
-import { App, TFile, Notice } from 'obsidian';
+import { App, TFile, TFolder, Notice } from 'obsidian';
 import type { VaultIndexer } from './indexer';
 import type { LlamaPluginSettings } from './types';
 
@@ -160,6 +160,80 @@ export const TOOL_DEFINITIONS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'move_note',
+      description: 'Move a note (or any file) from one vault path to another. Can be used to reorganize files across folders.',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: 'Current vault-relative path of the note, e.g. "Inbox/Note.md"' },
+          destination: { type: 'string', description: 'New vault-relative path including filename, e.g. "Projects/Note.md"' },
+        },
+        required: ['source', 'destination'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'rename_note',
+      description: 'Rename a note within the same folder. Only changes the filename, not the folder.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Current vault-relative path of the note' },
+          new_name: { type: 'string', description: 'New filename (with .md extension), e.g. "BetterTitle.md"' },
+        },
+        required: ['path', 'new_name'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'copy_note',
+      description: 'Copy a note to a new path. The original is left unchanged.',
+      parameters: {
+        type: 'object',
+        properties: {
+          source: { type: 'string', description: 'Vault-relative path of the note to copy' },
+          destination: { type: 'string', description: 'Vault-relative path for the new copy, including filename' },
+        },
+        required: ['source', 'destination'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_note',
+      description: 'Permanently delete a note from the vault. Use with caution — this cannot be undone via the undo stack.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Vault-relative path of the note to delete' },
+          confirm: { type: 'boolean', description: 'Must be true to proceed with deletion' },
+        },
+        required: ['path', 'confirm'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_folder',
+      description: 'Create a new folder (directory) in the vault. Creates all intermediate parent folders as needed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Vault-relative folder path to create, e.g. "Projects/2024/Q1"' },
+        },
+        required: ['path'],
+      },
+    },
+  },
 ] as const;
 
 // ─── Prompt-Injection Template (fallback mode) ────────────────────────────────
@@ -175,6 +249,11 @@ Available tools:
 - edit_note(path, mode, old_text?, new_text?, new_content?): Edit a note
 - create_note(path, content, overwrite?): Create a new note
 - open_note(paths): Open one or more notes in editor tabs
+- move_note(source, destination): Move a note to a new path
+- rename_note(path, new_name): Rename a note (same folder)
+- copy_note(source, destination): Copy a note to a new path
+- delete_note(path, confirm): Delete a note permanently (confirm must be true)
+- create_folder(path): Create a new folder
 
 Format:
 <tool_call>
@@ -227,6 +306,11 @@ export class ToolExecutor {
         case 'edit_note':      return await this.toolEditNote(args);
         case 'create_note':    return await this.toolCreateNote(args);
         case 'open_note':      return await this.toolOpenNote(args);
+        case 'move_note':      return await this.toolMoveNote(args);
+        case 'rename_note':    return await this.toolRenameNote(args);
+        case 'copy_note':      return await this.toolCopyNote(args);
+        case 'delete_note':    return await this.toolDeleteNote(args);
+        case 'create_folder':  return await this.toolCreateFolder(args);
         default:               return `Error: Unknown tool "${name}"`;
       }
     } catch (e) {
@@ -434,6 +518,139 @@ export class ToolExecutor {
     const report = opened.map(p => `"${p}"`).join(', ');
     const missingReport = missing.length > 0 ? ` (not found: ${missing.map(p => `"${p}"`).join(', ')})` : '';
     return `✅ Opened ${opened.length} note(s): ${report}${missingReport}`;
+  }
+
+  private async toolMoveNote(args: Record<string, unknown>): Promise<string> {
+    if (this.settings.editPermission === 'read_only') {
+      return 'Error: Edit permission is set to read-only. Change it in plugin settings.';
+    }
+    const source = this.validatePath(args.source);
+    const destination = this.validatePath(args.destination);
+    if (!source) return 'Error: Invalid or missing source path';
+    if (!destination) return 'Error: Invalid or missing destination path';
+
+    const file = this.app.vault.getAbstractFileByPath(source);
+    if (!file) return `Error: File not found: ${source}`;
+
+    // Ensure destination parent folder exists
+    const destFolder = destination.includes('/')
+      ? destination.substring(0, destination.lastIndexOf('/'))
+      : '';
+    if (destFolder) {
+      const folderExists = this.app.vault.getAbstractFileByPath(destFolder);
+      if (!folderExists) {
+        await this.app.vault.createFolder(destFolder);
+      }
+    }
+
+    await this.app.fileManager.renameFile(file, destination);
+
+    // Update index
+    const newFile = this.app.vault.getAbstractFileByPath(destination);
+    if (newFile instanceof TFile) await this.indexer.updateFile(newFile);
+    this.indexer.removeFile(source);
+
+    return `✅ Moved "${source}" → "${destination}"`;
+  }
+
+  private async toolRenameNote(args: Record<string, unknown>): Promise<string> {
+    if (this.settings.editPermission === 'read_only') {
+      return 'Error: Edit permission is set to read-only. Change it in plugin settings.';
+    }
+    const path = this.validatePath(args.path);
+    const newName = String(args.new_name ?? '').trim();
+    if (!path) return 'Error: Invalid or missing path';
+    if (!newName) return 'Error: Invalid or missing new_name';
+
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file) return `Error: File not found: ${path}`;
+
+    // Build the new path keeping the same parent folder
+    const parentFolder = path.includes('/')
+      ? path.substring(0, path.lastIndexOf('/') + 1)
+      : '';
+    const newPath = parentFolder + newName;
+
+    await this.app.fileManager.renameFile(file, newPath);
+
+    const newFile = this.app.vault.getAbstractFileByPath(newPath);
+    if (newFile instanceof TFile) await this.indexer.updateFile(newFile);
+    this.indexer.removeFile(path);
+
+    return `✅ Renamed "${path}" → "${newPath}"`;
+  }
+
+  private async toolCopyNote(args: Record<string, unknown>): Promise<string> {
+    if (this.settings.editPermission === 'read_only') {
+      return 'Error: Edit permission is set to read-only. Change it in plugin settings.';
+    }
+    const source = this.validatePath(args.source);
+    const destination = this.validatePath(args.destination);
+    if (!source) return 'Error: Invalid or missing source path';
+    if (!destination) return 'Error: Invalid or missing destination path';
+
+    const file = this.app.vault.getAbstractFileByPath(source);
+    if (!(file instanceof TFile)) return `Error: Note not found: ${source}`;
+
+    const content = await this.app.vault.read(file);
+
+    // Ensure destination parent folder exists
+    const destFolder = destination.includes('/')
+      ? destination.substring(0, destination.lastIndexOf('/'))
+      : '';
+    if (destFolder) {
+      const folderExists = this.app.vault.getAbstractFileByPath(destFolder);
+      if (!folderExists) {
+        await this.app.vault.createFolder(destFolder);
+      }
+    }
+
+    const existingDest = this.app.vault.getAbstractFileByPath(destination);
+    if (existingDest) return `Error: Destination already exists: ${destination}. Choose a different path.`;
+
+    await this.app.vault.create(destination, content);
+    const newFile = this.app.vault.getAbstractFileByPath(destination);
+    if (newFile instanceof TFile) await this.indexer.updateFile(newFile);
+
+    return `✅ Copied "${source}" → "${destination}"`;
+  }
+
+  private async toolDeleteNote(args: Record<string, unknown>): Promise<string> {
+    if (this.settings.editPermission !== 'full_edit') {
+      return 'Error: Deleting notes requires "full_edit" permission in plugin settings.';
+    }
+    const path = this.validatePath(args.path);
+    if (!path) return 'Error: Invalid or missing path';
+    if (!args.confirm) return 'Error: confirm must be set to true to delete a note.';
+
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!file) return `Error: File not found: ${path}`;
+
+    // Save undo snapshot if it's a TFile
+    if (file instanceof TFile) {
+      const content = await this.app.vault.read(file);
+      this.pushUndo(path, content, `delete ${path}`);
+    }
+
+    await this.app.vault.trash(file, true);
+    this.indexer.removeFile(path);
+
+    return `✅ Deleted "${path}" (moved to system trash)`;
+  }
+
+  private async toolCreateFolder(args: Record<string, unknown>): Promise<string> {
+    if (this.settings.editPermission === 'read_only') {
+      return 'Error: Edit permission is set to read-only. Change it in plugin settings.';
+    }
+    const path = this.validatePath(args.path);
+    if (!path) return 'Error: Invalid or missing path';
+
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFolder) return `Error: Folder already exists: ${path}`;
+    if (existing) return `Error: A file exists at that path: ${path}`;
+
+    await this.app.vault.createFolder(path);
+    return `✅ Created folder "${path}"`;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
