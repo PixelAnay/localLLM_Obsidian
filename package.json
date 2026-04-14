@@ -5,7 +5,9 @@
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production"
+    "build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
+    "sync": "powershell -ExecutionPolicy Bypass -File ./scripts/sync-plugin.ps1",
+    "deploy": "npm run build && npm run sync"
   },
   "keywords": [
     "obsidian",

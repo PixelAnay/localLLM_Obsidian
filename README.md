@@ -24,6 +24,7 @@ Sidebar chat for Obsidian powered by a local LLM server (llama.cpp-compatible), 
 - Exclusion patterns for private files/folders
 - Optional diff preview controls
 - Attachment support in chat input (including PDF pages rendered as images)
+- Past chats history with session switch, new chat, and delete controls
 
 ## Requirements
 
@@ -117,6 +118,24 @@ Default endpoint in settings: `http://localhost:8080`
 
 - `npm run dev`: esbuild watch mode
 - `npm run build`: Type-check + production bundle
+- `npm run sync`: copy `main.js`, `manifest.json`, and `styles.css` to your vault plugin folder
+- `npm run deploy`: build + sync in one command
+
+### One-Time Setup For Sync/Deploy
+
+Set your vault path in an environment variable so sync knows where to copy files.
+
+PowerShell:
+
+```powershell
+setx OBSIDIAN_VAULT_PATH "C:\Path\To\Your\Vault"
+```
+
+Then restart terminal/VS Code and run:
+
+```bash
+npm run deploy
+```
 
 ## Project Structure
 

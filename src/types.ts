@@ -70,6 +70,16 @@ export interface LlamaPluginSettings {
   temperature: number;
 }
 
+// ─── Persisted Chat History Types ───────────────────────────────────────────
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: ChatMessage[];
+}
+
 // ─── UI Event Types ───────────────────────────────────────────────────────────
 
 export interface StreamChunk {

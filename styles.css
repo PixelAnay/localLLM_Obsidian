@@ -91,6 +91,47 @@
   white-space: nowrap;
 }
 
+.llama-chat-session-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding-right: 110px;
+}
+
+.llama-chat-select {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 11px;
+  padding: 0 8px;
+}
+
+.llama-chat-select:disabled {
+  opacity: 0.6;
+}
+
+.llama-session-btn {
+  height: 26px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.llama-session-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
 .llama-header-actions {
   display: flex;
   gap: 2px;

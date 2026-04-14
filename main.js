@@ -76,6 +76,7 @@ var ChatView = class extends import_obsidian.ItemView {
     super(leaf);
     this.messages = [];
     this.displayMessages = [];
+    this.currentChatId = "";
     this.isStreaming = false;
     this.pendingAttachments = [];
     this.plugin = plugin;
@@ -91,6 +92,9 @@ var ChatView = class extends import_obsidian.ItemView {
   }
   async onOpen() {
     this.buildUI();
+    this.initializeCurrentChat();
+    this.renderMessages();
+    this.refreshChatSessionControls();
     await this.checkConnection();
     this.plugin.toolExecutor.onOpenNotes = (paths) => this.openNotes(paths);
   }
@@ -114,12 +118,26 @@ var ChatView = class extends import_obsidian.ItemView {
     this.statusLabel = statusRow.createSpan("llama-status-label");
     this.statusLabel.textContent = "Connecting\u2026";
     this.noteCountEl = statusRow.createSpan("llama-note-count");
+    const sessionControls = header.createDiv("llama-chat-session-controls");
+    this.chatSelectEl = sessionControls.createEl("select", { cls: "llama-chat-select" });
+    this.chatSelectEl.addEventListener("change", () => {
+      if (this.isStreaming) {
+        this.chatSelectEl.value = this.currentChatId;
+        return;
+      }
+      this.switchToSession(this.chatSelectEl.value);
+    });
+    const newChatBtn = sessionControls.createEl("button", { cls: "llama-session-btn", text: "New chat", title: "Start new chat" });
+    newChatBtn.addEventListener("click", () => this.startNewChat());
+    this.deleteChatBtn = sessionControls.createEl("button", { cls: "llama-icon-btn", title: "Delete current chat" });
+    (0, import_obsidian.setIcon)(this.deleteChatBtn, "trash-2");
+    this.deleteChatBtn.addEventListener("click", () => this.deleteCurrentChat());
     const headerActions = header.createDiv("llama-header-actions");
     const refreshBtn = headerActions.createEl("button", { cls: "llama-icon-btn", title: "Check connection" });
     (0, import_obsidian.setIcon)(refreshBtn, "refresh-cw");
     refreshBtn.addEventListener("click", () => this.checkConnection());
-    const clearBtn = headerActions.createEl("button", { cls: "llama-icon-btn", title: "Clear chat" });
-    (0, import_obsidian.setIcon)(clearBtn, "trash-2");
+    const clearBtn = headerActions.createEl("button", { cls: "llama-icon-btn", title: "Clear current chat messages" });
+    (0, import_obsidian.setIcon)(clearBtn, "eraser");
     clearBtn.addEventListener("click", () => this.clearChat());
     const undoBtn = headerActions.createEl("button", { cls: "llama-icon-btn", title: "Undo last AI edit" });
     (0, import_obsidian.setIcon)(undoBtn, "rotate-ccw");
@@ -131,7 +149,6 @@ var ChatView = class extends import_obsidian.ItemView {
       this.app.setting.openTabById("obsidian-llama-chat");
     });
     this.messagesContainer = root.createDiv("llama-messages");
-    this.renderWelcome();
     const inputBar = root.createDiv("llama-input-bar");
     this.attachmentPreviewEl = inputBar.createDiv("llama-input-attachments");
     this.inputArea = inputBar.createEl("textarea", {
@@ -245,6 +262,137 @@ var ChatView = class extends import_obsidian.ItemView {
       this.statusLabel.textContent = "Connecting\u2026";
     }
   }
+  // ── Chat Sessions ─────────────────────────────────────────────────────────
+  initializeCurrentChat() {
+    const first = this.plugin.chatSessions[0];
+    if (first) {
+      this.switchToSession(first.id);
+      return;
+    }
+    const newSession = this.createSession();
+    this.plugin.upsertChatSession(newSession);
+    this.switchToSession(newSession.id);
+  }
+  createSession(title = "New chat") {
+    const now = Date.now();
+    return {
+      id: this.createSessionId(),
+      title,
+      createdAt: now,
+      updatedAt: now,
+      messages: []
+    };
+  }
+  createSessionId() {
+    const rand = Math.random().toString(36).slice(2, 9);
+    return `chat-${Date.now()}-${rand}`;
+  }
+  switchToSession(id) {
+    const session = this.plugin.chatSessions.find((s) => s.id === id);
+    if (!session)
+      return;
+    this.currentChatId = session.id;
+    this.messages = [...session.messages];
+    this.displayMessages = this.buildDisplayMessagesFromHistory(this.messages);
+    this.pendingAttachments = [];
+    this.renderAttachmentPreviews();
+    this.renderMessages();
+    this.refreshChatSessionControls();
+  }
+  startNewChat() {
+    if (this.isStreaming)
+      return;
+    const session = this.createSession();
+    this.plugin.upsertChatSession(session);
+    this.switchToSession(session.id);
+    this.inputArea.focus();
+  }
+  deleteCurrentChat() {
+    if (this.isStreaming)
+      return;
+    const session = this.plugin.chatSessions.find((s) => s.id === this.currentChatId);
+    if (!session)
+      return;
+    const ok = window.confirm(`Delete chat "${session.title}"?`);
+    if (!ok)
+      return;
+    this.plugin.deleteChatSession(session.id);
+    if (this.plugin.chatSessions.length === 0) {
+      const fresh = this.createSession();
+      this.plugin.upsertChatSession(fresh);
+    }
+    const next = this.plugin.chatSessions[0];
+    if (next)
+      this.switchToSession(next.id);
+  }
+  refreshChatSessionControls() {
+    if (!this.chatSelectEl)
+      return;
+    this.chatSelectEl.empty();
+    for (const session of this.plugin.chatSessions) {
+      const option = this.chatSelectEl.createEl("option");
+      option.value = session.id;
+      option.textContent = session.title;
+    }
+    this.chatSelectEl.value = this.currentChatId;
+    const hasSession = this.plugin.chatSessions.length > 0;
+    this.chatSelectEl.disabled = !hasSession || this.isStreaming;
+    this.deleteChatBtn.disabled = !hasSession || this.isStreaming;
+  }
+  persistCurrentChat() {
+    var _a;
+    if (!this.currentChatId)
+      return;
+    const existing = this.plugin.chatSessions.find((s) => s.id === this.currentChatId);
+    const title = (existing == null ? void 0 : existing.title) || "New chat";
+    const now = Date.now();
+    const createdAt = (_a = existing == null ? void 0 : existing.createdAt) != null ? _a : now;
+    this.plugin.upsertChatSession({
+      id: this.currentChatId,
+      title,
+      createdAt,
+      updatedAt: now,
+      messages: [...this.messages]
+    });
+    this.refreshChatSessionControls();
+  }
+  updateCurrentChatTitleFromPrompt(prompt) {
+    if (!prompt.trim() || !this.currentChatId)
+      return;
+    const session = this.plugin.chatSessions.find((s) => s.id === this.currentChatId);
+    if (!session || session.title !== "New chat" || session.messages.length > 1)
+      return;
+    session.title = this.buildSessionTitle(prompt);
+    session.updatedAt = Date.now();
+    this.plugin.upsertChatSession(session);
+    this.refreshChatSessionControls();
+  }
+  buildSessionTitle(text) {
+    const normalized = text.replace(/\s+/g, " ").trim();
+    if (!normalized)
+      return "New chat";
+    return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
+  }
+  buildDisplayMessagesFromHistory(messages) {
+    const result = [];
+    for (const msg of messages) {
+      if (msg.role !== "user" && msg.role !== "assistant")
+        continue;
+      result.push({
+        role: msg.role,
+        content: this.toDisplayText(msg.content),
+        attachments: msg.attachments
+      });
+    }
+    return result;
+  }
+  toDisplayText(content) {
+    if (typeof content === "string")
+      return content;
+    if (!Array.isArray(content))
+      return "";
+    return content.filter((part) => part && part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
+  }
   // ── Sending Messages ───────────────────────────────────────────────────────
   async sendMessage() {
     const text = this.inputArea.value.trim();
@@ -269,6 +417,8 @@ var ChatView = class extends import_obsidian.ItemView {
     }
     this.displayMessages.push({ role: "user", content: text, attachments: attachmentsToMove });
     this.messages.push({ role: "user", content, attachments: attachmentsToMove });
+    this.updateCurrentChatTitleFromPrompt(text);
+    this.persistCurrentChat();
     this.renderMessages();
     this.setStreaming(true);
     const enrichedMessages = await this.plugin.contextBuilder.prependSystemMessage(
@@ -325,6 +475,7 @@ var ChatView = class extends import_obsidian.ItemView {
       this.updateLastBubble(assistantDisplay);
     }
     this.messages = finalMessages.filter((m) => m.role !== "system");
+    this.persistCurrentChat();
     this.setStreaming(false);
     this.scrollToBottom();
   }
@@ -362,6 +513,7 @@ var ChatView = class extends import_obsidian.ItemView {
       this.renderAttachmentPreviews();
     }
     this.renderMessages();
+    this.persistCurrentChat();
   }
   renderWelcome() {
     const welcome = this.messagesContainer.createDiv("llama-welcome");
@@ -639,8 +791,14 @@ var ChatView = class extends import_obsidian.ItemView {
     walkTextNodes(el);
   }
   clearChat() {
+    if (this.isStreaming)
+      return;
     this.messages = [];
     this.displayMessages = [];
+    const session = this.plugin.chatSessions.find((s) => s.id === this.currentChatId);
+    if (session)
+      session.title = "New chat";
+    this.persistCurrentChat();
     this.renderMessages();
   }
   async undoLastEdit() {
@@ -656,6 +814,7 @@ var ChatView = class extends import_obsidian.ItemView {
     this.sendBtn.style.display = streaming ? "none" : "flex";
     this.stopBtn.style.display = streaming ? "flex" : "none";
     this.inputArea.disabled = streaming;
+    this.refreshChatSessionControls();
     if (!streaming) {
       this.inputArea.focus();
     }
@@ -1779,7 +1938,9 @@ var LlamaSettingTab = class extends import_obsidian4.PluginSettingTab {
 var LlamaPlugin = class extends import_obsidian5.Plugin {
   constructor() {
     super(...arguments);
+    this.chatSessions = [];
     this.indexRebuildTimer = null;
+    this.chatPersistTimer = null;
   }
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   async onload() {
@@ -1790,6 +1951,7 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
       return;
     }
     await this.loadSettings();
+    await this.loadChatSessions();
     this.initServices();
     this.registerView(LLAMA_CHAT_VIEW_TYPE, (leaf) => new ChatView(leaf, this));
     this.addRibbonIcon("message-circle", "Open LLAMA Chat", () => this.activateView());
@@ -1811,6 +1973,8 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
     this.app.workspace.detachLeavesOfType(LLAMA_CHAT_VIEW_TYPE);
     if (this.indexRebuildTimer)
       clearTimeout(this.indexRebuildTimer);
+    if (this.chatPersistTimer)
+      clearTimeout(this.chatPersistTimer);
   }
   // ── Settings ───────────────────────────────────────────────────────────────
   async loadSettings() {
@@ -1830,6 +1994,42 @@ var LlamaPlugin = class extends import_obsidian5.Plugin {
       this.contextBuilder.updateSettings(this.settings);
     if (this.indexer)
       this.indexer.updateSettings(this.settings);
+  }
+  // ── Chat Sessions ─────────────────────────────────────────────────────────
+  async loadChatSessions() {
+    const data = await this.loadData();
+    const sessions = Array.isArray(data == null ? void 0 : data.chatSessions) ? data.chatSessions : [];
+    this.chatSessions = sessions.filter((s) => s && typeof s.id === "string" && Array.isArray(s.messages)).map((s) => ({
+      id: s.id,
+      title: typeof s.title === "string" && s.title.trim() ? s.title : "New chat",
+      createdAt: typeof s.createdAt === "number" ? s.createdAt : Date.now(),
+      updatedAt: typeof s.updatedAt === "number" ? s.updatedAt : Date.now(),
+      messages: s.messages
+    })).sort((a, b) => b.updatedAt - a.updatedAt);
+  }
+  async saveChatSessions() {
+    var _a;
+    const existing = (_a = await this.loadData()) != null ? _a : {};
+    await this.saveData({ ...existing, chatSessions: this.chatSessions });
+  }
+  scheduleSaveChatSessions() {
+    if (this.chatPersistTimer)
+      clearTimeout(this.chatPersistTimer);
+    this.chatPersistTimer = setTimeout(() => this.saveChatSessions(), 800);
+  }
+  upsertChatSession(session) {
+    const idx = this.chatSessions.findIndex((s) => s.id === session.id);
+    const withTouch = { ...session, updatedAt: session.updatedAt || Date.now() };
+    if (idx >= 0)
+      this.chatSessions[idx] = withTouch;
+    else
+      this.chatSessions.push(withTouch);
+    this.chatSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.scheduleSaveChatSessions();
+  }
+  deleteChatSession(id) {
+    this.chatSessions = this.chatSessions.filter((s) => s.id !== id);
+    this.scheduleSaveChatSessions();
   }
   // ── Services ───────────────────────────────────────────────────────────────
   initServices() {

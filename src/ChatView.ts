@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, MarkdownRenderer, Notice, setIcon, Component } from 'obsidian';
 import type LlamaPlugin from './main';
-import type { ChatMessage, StreamChunk, MessageContentPart } from './types';
+import type { ChatMessage, StreamChunk, MessageContentPart, ChatSession } from './types';
 
 /** Render Markdown safely across Obsidian versions */
 function renderMarkdownCompat(
@@ -17,8 +17,6 @@ function renderMarkdownCompat(
     (MarkdownRenderer as any).renderMarkdown(source, el, '', component);
   }
 }
-
-const CHAT_HISTORY_KEY = 'llama-chat-history';
 
 async function getPdfJs(): Promise<any> {
   if ((window as any).pdfjsLib) return (window as any).pdfjsLib;
@@ -76,6 +74,7 @@ export class ChatView extends ItemView {
   private plugin: LlamaPlugin;
   private messages: ChatMessage[] = [];
   private displayMessages: DisplayMessage[] = [];
+  private currentChatId = '';
   private isStreaming = false;
   private pendingAttachments: { name: string; type: string; dataUrl: string }[] = [];
 
@@ -87,6 +86,8 @@ export class ChatView extends ItemView {
   private sendBtn!: HTMLButtonElement;
   private stopBtn!: HTMLButtonElement;
   private noteCountEl!: HTMLElement;
+  private chatSelectEl!: HTMLSelectElement;
+  private deleteChatBtn!: HTMLButtonElement;
   private attachInput!: HTMLInputElement;
   private attachmentPreviewEl!: HTMLElement;
 
@@ -101,6 +102,9 @@ export class ChatView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.buildUI();
+    this.initializeCurrentChat();
+    this.renderMessages();
+    this.refreshChatSessionControls();
     await this.checkConnection();
 
     // Register callback so ToolExecutor can open notes in tabs
@@ -134,14 +138,31 @@ export class ChatView extends ItemView {
 
     this.noteCountEl = statusRow.createSpan('llama-note-count');
 
+    const sessionControls = header.createDiv('llama-chat-session-controls');
+    this.chatSelectEl = sessionControls.createEl('select', { cls: 'llama-chat-select' });
+    this.chatSelectEl.addEventListener('change', () => {
+      if (this.isStreaming) {
+        this.chatSelectEl.value = this.currentChatId;
+        return;
+      }
+      this.switchToSession(this.chatSelectEl.value);
+    });
+
+    const newChatBtn = sessionControls.createEl('button', { cls: 'llama-session-btn', text: 'New chat', title: 'Start new chat' });
+    newChatBtn.addEventListener('click', () => this.startNewChat());
+
+    this.deleteChatBtn = sessionControls.createEl('button', { cls: 'llama-icon-btn', title: 'Delete current chat' });
+    setIcon(this.deleteChatBtn, 'trash-2');
+    this.deleteChatBtn.addEventListener('click', () => this.deleteCurrentChat());
+
     const headerActions = header.createDiv('llama-header-actions');
 
     const refreshBtn = headerActions.createEl('button', { cls: 'llama-icon-btn', title: 'Check connection' });
     setIcon(refreshBtn, 'refresh-cw');
     refreshBtn.addEventListener('click', () => this.checkConnection());
 
-    const clearBtn = headerActions.createEl('button', { cls: 'llama-icon-btn', title: 'Clear chat' });
-    setIcon(clearBtn, 'trash-2');
+    const clearBtn = headerActions.createEl('button', { cls: 'llama-icon-btn', title: 'Clear current chat messages' });
+    setIcon(clearBtn, 'eraser');
     clearBtn.addEventListener('click', () => this.clearChat());
 
     const undoBtn = headerActions.createEl('button', { cls: 'llama-icon-btn', title: 'Undo last AI edit' });
@@ -157,7 +178,6 @@ export class ChatView extends ItemView {
 
     // ── Messages ─────────────────────────────────────────────────────────────
     this.messagesContainer = root.createDiv('llama-messages');
-    this.renderWelcome();
 
     // ── Input Bar ─────────────────────────────────────────────────────────────
     const inputBar = root.createDiv('llama-input-bar');
@@ -294,6 +314,154 @@ export class ChatView extends ItemView {
     }
   }
 
+  // ── Chat Sessions ─────────────────────────────────────────────────────────
+
+  private initializeCurrentChat(): void {
+    const first = this.plugin.chatSessions[0];
+    if (first) {
+      this.switchToSession(first.id);
+      return;
+    }
+
+    const newSession = this.createSession();
+    this.plugin.upsertChatSession(newSession);
+    this.switchToSession(newSession.id);
+  }
+
+  private createSession(title = 'New chat'): ChatSession {
+    const now = Date.now();
+    return {
+      id: this.createSessionId(),
+      title,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    };
+  }
+
+  private createSessionId(): string {
+    const rand = Math.random().toString(36).slice(2, 9);
+    return `chat-${Date.now()}-${rand}`;
+  }
+
+  private switchToSession(id: string): void {
+    const session = this.plugin.chatSessions.find(s => s.id === id);
+    if (!session) return;
+
+    this.currentChatId = session.id;
+    this.messages = [...session.messages];
+    this.displayMessages = this.buildDisplayMessagesFromHistory(this.messages);
+    this.pendingAttachments = [];
+    this.renderAttachmentPreviews();
+    this.renderMessages();
+    this.refreshChatSessionControls();
+  }
+
+  private startNewChat(): void {
+    if (this.isStreaming) return;
+    const session = this.createSession();
+    this.plugin.upsertChatSession(session);
+    this.switchToSession(session.id);
+    this.inputArea.focus();
+  }
+
+  private deleteCurrentChat(): void {
+    if (this.isStreaming) return;
+
+    const session = this.plugin.chatSessions.find(s => s.id === this.currentChatId);
+    if (!session) return;
+
+    const ok = window.confirm(`Delete chat \"${session.title}\"?`);
+    if (!ok) return;
+
+    this.plugin.deleteChatSession(session.id);
+    if (this.plugin.chatSessions.length === 0) {
+      const fresh = this.createSession();
+      this.plugin.upsertChatSession(fresh);
+    }
+
+    const next = this.plugin.chatSessions[0];
+    if (next) this.switchToSession(next.id);
+  }
+
+  private refreshChatSessionControls(): void {
+    if (!this.chatSelectEl) return;
+
+    this.chatSelectEl.empty();
+    for (const session of this.plugin.chatSessions) {
+      const option = this.chatSelectEl.createEl('option');
+      option.value = session.id;
+      option.textContent = session.title;
+    }
+
+    this.chatSelectEl.value = this.currentChatId;
+    const hasSession = this.plugin.chatSessions.length > 0;
+    this.chatSelectEl.disabled = !hasSession || this.isStreaming;
+    this.deleteChatBtn.disabled = !hasSession || this.isStreaming;
+  }
+
+  private persistCurrentChat(): void {
+    if (!this.currentChatId) return;
+
+    const existing = this.plugin.chatSessions.find(s => s.id === this.currentChatId);
+    const title = existing?.title || 'New chat';
+    const now = Date.now();
+    const createdAt = existing?.createdAt ?? now;
+
+    this.plugin.upsertChatSession({
+      id: this.currentChatId,
+      title,
+      createdAt,
+      updatedAt: now,
+      messages: [...this.messages],
+    });
+
+    this.refreshChatSessionControls();
+  }
+
+  private updateCurrentChatTitleFromPrompt(prompt: string): void {
+    if (!prompt.trim() || !this.currentChatId) return;
+
+    const session = this.plugin.chatSessions.find(s => s.id === this.currentChatId);
+    if (!session || session.title !== 'New chat' || session.messages.length > 1) return;
+
+    session.title = this.buildSessionTitle(prompt);
+    session.updatedAt = Date.now();
+    this.plugin.upsertChatSession(session);
+    this.refreshChatSessionControls();
+  }
+
+  private buildSessionTitle(text: string): string {
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    if (!normalized) return 'New chat';
+    return normalized.length > 48 ? `${normalized.slice(0, 48)}...` : normalized;
+  }
+
+  private buildDisplayMessagesFromHistory(messages: ChatMessage[]): DisplayMessage[] {
+    const result: DisplayMessage[] = [];
+
+    for (const msg of messages) {
+      if (msg.role !== 'user' && msg.role !== 'assistant') continue;
+      result.push({
+        role: msg.role,
+        content: this.toDisplayText(msg.content),
+        attachments: msg.attachments,
+      });
+    }
+
+    return result;
+  }
+
+  private toDisplayText(content: ChatMessage['content']): string {
+    if (typeof content === 'string') return content;
+    if (!Array.isArray(content)) return '';
+
+    return content
+      .filter(part => part && part.type === 'text' && typeof part.text === 'string')
+      .map(part => part.text as string)
+      .join('\n');
+  }
+
   // ── Sending Messages ───────────────────────────────────────────────────────
 
   private async sendMessage(): Promise<void> {
@@ -326,6 +494,8 @@ export class ChatView extends ItemView {
     // Add user message to display
     this.displayMessages.push({ role: 'user', content: text, attachments: attachmentsToMove });
     this.messages.push({ role: 'user', content, attachments: attachmentsToMove });
+    this.updateCurrentChatTitleFromPrompt(text);
+    this.persistCurrentChat();
     this.renderMessages();
 
     this.setStreaming(true);
@@ -384,6 +554,7 @@ export class ChatView extends ItemView {
 
     // Update canonical message history with final state (excluding system)
     this.messages = finalMessages.filter(m => m.role !== 'system');
+    this.persistCurrentChat();
 
     this.setStreaming(false);
     this.scrollToBottom();
@@ -429,6 +600,7 @@ export class ChatView extends ItemView {
     }
 
     this.renderMessages();
+    this.persistCurrentChat();
   }
 
   private renderWelcome(): void {
@@ -771,8 +943,12 @@ export class ChatView extends ItemView {
   }
 
   private clearChat(): void {
+    if (this.isStreaming) return;
     this.messages = [];
     this.displayMessages = [];
+    const session = this.plugin.chatSessions.find(s => s.id === this.currentChatId);
+    if (session) session.title = 'New chat';
+    this.persistCurrentChat();
     this.renderMessages();
   }
 
@@ -790,6 +966,7 @@ export class ChatView extends ItemView {
     this.sendBtn.style.display = streaming ? 'none' : 'flex';
     this.stopBtn.style.display = streaming ? 'flex' : 'none';
     this.inputArea.disabled = streaming;
+    this.refreshChatSessionControls();
     if (!streaming) {
       // Re-focus so the user can type the next message immediately
       this.inputArea.focus();

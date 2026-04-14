@@ -5,7 +5,7 @@ import { LLMClient } from './llm';
 import { ToolExecutor } from './tools';
 import { ContextBuilder } from './context';
 import { LlamaSettingTab, DEFAULT_SETTINGS } from './settings';
-import type { LlamaPluginSettings, VaultIndex } from './types';
+import type { ChatSession, LlamaPluginSettings, VaultIndex } from './types';
 
 export default class LlamaPlugin extends Plugin {
   settings!: LlamaPluginSettings;
@@ -13,8 +13,10 @@ export default class LlamaPlugin extends Plugin {
   llmClient!: LLMClient;
   toolExecutor!: ToolExecutor;
   contextBuilder!: ContextBuilder;
+  chatSessions: ChatSession[] = [];
 
   private indexRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+  private chatPersistTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -28,6 +30,7 @@ export default class LlamaPlugin extends Plugin {
     }
 
     await this.loadSettings();
+    await this.loadChatSessions();
     this.initServices();
 
     // Register sidebar view
@@ -62,6 +65,7 @@ export default class LlamaPlugin extends Plugin {
   onunload(): void {
     this.app.workspace.detachLeavesOfType(LLAMA_CHAT_VIEW_TYPE);
     if (this.indexRebuildTimer) clearTimeout(this.indexRebuildTimer);
+    if (this.chatPersistTimer) clearTimeout(this.chatPersistTimer);
   }
 
   // ── Settings ───────────────────────────────────────────────────────────────
@@ -80,6 +84,48 @@ export default class LlamaPlugin extends Plugin {
     if (this.toolExecutor) this.toolExecutor.updateSettings(this.settings);
     if (this.contextBuilder) this.contextBuilder.updateSettings(this.settings);
     if (this.indexer) this.indexer.updateSettings(this.settings);
+  }
+
+  // ── Chat Sessions ─────────────────────────────────────────────────────────
+
+  async loadChatSessions(): Promise<void> {
+    const data = await this.loadData();
+    const sessions = Array.isArray(data?.chatSessions) ? data.chatSessions : [];
+    this.chatSessions = sessions
+      .filter((s: any) => s && typeof s.id === 'string' && Array.isArray(s.messages))
+      .map((s: any) => ({
+        id: s.id,
+        title: typeof s.title === 'string' && s.title.trim() ? s.title : 'New chat',
+        createdAt: typeof s.createdAt === 'number' ? s.createdAt : Date.now(),
+        updatedAt: typeof s.updatedAt === 'number' ? s.updatedAt : Date.now(),
+        messages: s.messages,
+      }))
+      .sort((a: ChatSession, b: ChatSession) => b.updatedAt - a.updatedAt);
+  }
+
+  async saveChatSessions(): Promise<void> {
+    const existing = (await this.loadData()) ?? {};
+    await this.saveData({ ...existing, chatSessions: this.chatSessions });
+  }
+
+  scheduleSaveChatSessions(): void {
+    if (this.chatPersistTimer) clearTimeout(this.chatPersistTimer);
+    this.chatPersistTimer = setTimeout(() => this.saveChatSessions(), 800);
+  }
+
+  upsertChatSession(session: ChatSession): void {
+    const idx = this.chatSessions.findIndex(s => s.id === session.id);
+    const withTouch = { ...session, updatedAt: session.updatedAt || Date.now() };
+    if (idx >= 0) this.chatSessions[idx] = withTouch;
+    else this.chatSessions.push(withTouch);
+
+    this.chatSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.scheduleSaveChatSessions();
+  }
+
+  deleteChatSession(id: string): void {
+    this.chatSessions = this.chatSessions.filter(s => s.id !== id);
+    this.scheduleSaveChatSessions();
   }
 
   // ── Services ───────────────────────────────────────────────────────────────

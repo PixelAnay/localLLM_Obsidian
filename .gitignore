@@ -3,3 +3,12 @@ node_modules/
 data.json
 .hotreload
 test_out.js
+
+# Test artifacts
+test_*.js
+test_*.ts
+
+
+# Generated files
+versions.json
+scripts/
