@@ -122,8 +122,35 @@ export class MemoryManager {
 
   async openInEditor(): Promise<void> {
     const file = await this.ensureFile();
-    const leaf = this.app.workspace.getLeaf('tab');
+    let leaf;
+    try {
+      leaf = this.app.workspace.getLeaf('tab');
+    } catch {
+      leaf = this.app.workspace.getLeaf(true);
+    }
     await leaf.openFile(file, { active: true });
+  }
+
+  private async ensureParentFolder(filePath: string): Promise<void> {
+    const lastSlash = filePath.lastIndexOf('/');
+    if (lastSlash === -1) return;
+    const folderPath = filePath.substring(0, lastSlash);
+    if (!folderPath) return;
+
+    const segments = folderPath.split('/');
+    let currentPath = '';
+    for (const segment of segments) {
+      if (!segment) continue;
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      const exists = this.app.vault.getAbstractFileByPath(currentPath);
+      if (!exists) {
+        try {
+          await this.app.vault.createFolder(currentPath);
+        } catch (e) {
+          // Folder might have been created concurrently
+        }
+      }
+    }
   }
 
   private async ensureFile(): Promise<TFile> {
@@ -133,11 +160,8 @@ export class MemoryManager {
       throw new Error(`The memory path "${this.memoryPath}" already exists as a folder. Please choose a different path in settings.`);
     }
 
-    // Create parent folders
-    const parentPath = this.memoryPath.substring(0, this.memoryPath.lastIndexOf('/'));
-    if (parentPath) {
-      try { await this.app.vault.createFolder(parentPath); } catch { /* exists */ }
-    }
+    // Create parent folders recursively
+    await this.ensureParentFolder(this.memoryPath);
 
     // Create with template
     const template = this.buildTemplate();
@@ -257,10 +281,7 @@ export class MemoryManager {
         if (bakFile) {
           await this.app.vault.modify(bakFile, current);
         } else {
-          const bakParent = bakPath.substring(0, bakPath.lastIndexOf('/'));
-          if (bakParent) {
-            try { await this.app.vault.createFolder(bakParent); } catch { /* exists */ }
-          }
+          await this.ensureParentFolder(bakPath);
           await this.app.vault.create(bakPath, current);
         }
       }

@@ -90995,12 +90995,13 @@ var TOOL_ICONS = {
   create_folder: "\u{1F4C1}"
 };
 var MessageRenderer = class {
-  constructor(app, container, component, onCopyMessage, onEditMessage, onNoteClick, indexer) {
+  constructor(app, container, component, onCopyMessage, onEditMessage, onRegenerateMessage, onNoteClick, indexer) {
     this.app = app;
     this.container = container;
     this.component = component;
     this.onCopyMessage = onCopyMessage;
     this.onEditMessage = onEditMessage;
+    this.onRegenerateMessage = onRegenerateMessage;
     this.onNoteClick = onNoteClick;
     this.indexer = indexer;
     /** Map from DisplayMessage identity → rendered wrapper element */
@@ -91177,7 +91178,26 @@ var MessageRenderer = class {
         editBtn.className = "engram-msg-action-btn";
         editBtn.title = "Edit & Resend";
         (0, import_obsidian2.setIcon)(editBtn, "pencil");
-        editBtn.addEventListener("click", () => this.onEditMessage(msg));
+        editBtn.addEventListener("click", () => {
+          const bubbles = Array.from(this.container.querySelectorAll(".engram-msg-wrapper"));
+          const idx = bubbles.indexOf(wrapper);
+          if (idx !== -1) {
+            this.onEditMessage(idx);
+          }
+        });
+      }
+      if (msg.role === "assistant") {
+        const regenBtn = actions.appendChild(document.createElement("button"));
+        regenBtn.className = "engram-msg-action-btn";
+        regenBtn.title = "Regenerate response";
+        (0, import_obsidian2.setIcon)(regenBtn, "refresh-cw");
+        regenBtn.addEventListener("click", () => {
+          const bubbles = Array.from(this.container.querySelectorAll(".engram-msg-wrapper"));
+          const idx = bubbles.indexOf(wrapper);
+          if (idx !== -1) {
+            this.onRegenerateMessage(idx);
+          }
+        });
       }
     }
     return wrapper;
@@ -91926,7 +91946,8 @@ var ChatView = class extends import_obsidian4.ItemView {
       this.messagesContainer,
       this,
       (content) => navigator.clipboard.writeText(content),
-      (msg) => this.editMessage(msg),
+      (idx) => this.editMessage(idx),
+      (idx) => this.regenerateMessage(idx),
       (path) => this.openNotes([path]),
       this.plugin.indexer
     );
@@ -92307,12 +92328,15 @@ var ChatView = class extends import_obsidian4.ItemView {
     this.sessionManager.save(this.messages);
     this.messageRenderer.appendBubble(userDisplayMsg);
     this.scrollToBottom();
+    await this.executeTurn(text, apiContent, userDisplayMsg);
+  }
+  async executeTurn(textForContext, apiContent, userDisplayMsg) {
     try {
       this.showContextStatus("Building context\u2026");
       let attachedNotesList = [];
       const enriched = await this.plugin.contextBuilder.prependSystemMessage(
         this.messages.slice(0, -1),
-        text || "See attachment(s)",
+        textForContext || "See attachment(s)",
         (s) => this.showContextStatus(s),
         (paths) => {
           attachedNotesList = paths;
@@ -92706,12 +92730,12 @@ var ChatView = class extends import_obsidian4.ItemView {
       });
     }
   }
-  editMessage(msg) {
+  editMessage(idx) {
     if (this.isStreaming)
       return;
-    const idx = this.displayMessages.indexOf(msg);
-    if (idx === -1)
+    if (idx < 0 || idx >= this.displayMessages.length)
       return;
+    const msg = this.displayMessages[idx];
     let userCount = 0;
     for (let i = 0; i < idx; i++) {
       if (this.displayMessages[i].role === "user")
@@ -92740,6 +92764,46 @@ var ChatView = class extends import_obsidian4.ItemView {
     }
     this.renderMessages();
     this.sessionManager.save(this.messages);
+  }
+  async regenerateMessage(idx) {
+    if (this.isStreaming)
+      return;
+    if (idx < 0 || idx >= this.displayMessages.length)
+      return;
+    let userCount = 0;
+    for (let i = 0; i < idx; i++) {
+      if (this.displayMessages[i].role === "user")
+        userCount++;
+    }
+    let mIdx = -1, mUserCount = 0;
+    for (let i = 0; i < this.messages.length; i++) {
+      if (this.messages[i].role === "user") {
+        if (mUserCount === userCount - 1) {
+          mIdx = i;
+          break;
+        }
+        mUserCount++;
+      }
+    }
+    if (mIdx === -1)
+      return;
+    const userMsg = this.messages[mIdx];
+    const userDisplayMsg = this.displayMessages[idx - 1];
+    this.messages = this.messages.slice(0, mIdx + 1);
+    this.displayMessages = this.displayMessages.slice(0, idx);
+    this.sessionManager.save(this.messages);
+    this.renderMessages();
+    this.setStreaming(true);
+    let text = "";
+    let apiContent = "";
+    if (typeof userMsg.content === "string") {
+      text = userMsg.content;
+      apiContent = userMsg.content;
+    } else if (Array.isArray(userMsg.content)) {
+      text = userMsg.content.filter((p) => p && p.type === "text" && typeof p.text === "string").map((p) => p.text).join("\n");
+      apiContent = userMsg.content;
+    }
+    await this.executeTurn(text, apiContent, userDisplayMsg);
   }
   // ── Helpers ───────────────────────────────────────────────────────────────
   async openNotes(paths) {
@@ -94783,8 +94847,35 @@ var MemoryManager = class {
   // ── File management ───────────────────────────────────────────────────────
   async openInEditor() {
     const file = await this.ensureFile();
-    const leaf = this.app.workspace.getLeaf("tab");
+    let leaf;
+    try {
+      leaf = this.app.workspace.getLeaf("tab");
+    } catch (e) {
+      leaf = this.app.workspace.getLeaf(true);
+    }
     await leaf.openFile(file, { active: true });
+  }
+  async ensureParentFolder(filePath) {
+    const lastSlash = filePath.lastIndexOf("/");
+    if (lastSlash === -1)
+      return;
+    const folderPath = filePath.substring(0, lastSlash);
+    if (!folderPath)
+      return;
+    const segments = folderPath.split("/");
+    let currentPath = "";
+    for (const segment of segments) {
+      if (!segment)
+        continue;
+      currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+      const exists = this.app.vault.getAbstractFileByPath(currentPath);
+      if (!exists) {
+        try {
+          await this.app.vault.createFolder(currentPath);
+        } catch (e) {
+        }
+      }
+    }
   }
   async ensureFile() {
     const existing = this.app.vault.getAbstractFileByPath(this.memoryPath);
@@ -94793,13 +94884,7 @@ var MemoryManager = class {
     if (existing) {
       throw new Error(`The memory path "${this.memoryPath}" already exists as a folder. Please choose a different path in settings.`);
     }
-    const parentPath = this.memoryPath.substring(0, this.memoryPath.lastIndexOf("/"));
-    if (parentPath) {
-      try {
-        await this.app.vault.createFolder(parentPath);
-      } catch (e) {
-      }
-    }
+    await this.ensureParentFolder(this.memoryPath);
     const template = this.buildTemplate();
     return this.app.vault.create(this.memoryPath, template);
   }
@@ -94895,13 +94980,7 @@ var MemoryManager = class {
         if (bakFile) {
           await this.app.vault.modify(bakFile, current);
         } else {
-          const bakParent = bakPath.substring(0, bakPath.lastIndexOf("/"));
-          if (bakParent) {
-            try {
-              await this.app.vault.createFolder(bakParent);
-            } catch (e) {
-            }
-          }
+          await this.ensureParentFolder(bakPath);
           await this.app.vault.create(bakPath, current);
         }
       }

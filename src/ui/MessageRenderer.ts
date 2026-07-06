@@ -83,7 +83,8 @@ export class MessageRenderer {
     private container: HTMLElement,
     private component: Component,
     private onCopyMessage: (content: string) => void,
-    private onEditMessage: (msg: DisplayMessage) => void,
+    private onEditMessage: (idx: number) => void,
+    private onRegenerateMessage: (idx: number) => void,
     private onNoteClick: (path: string) => void,
     private indexer?: VaultIndexer
   ) {}
@@ -288,7 +289,27 @@ export class MessageRenderer {
         editBtn.className = 'engram-msg-action-btn';
         editBtn.title = 'Edit & Resend';
         setIcon(editBtn, 'pencil');
-        editBtn.addEventListener('click', () => this.onEditMessage(msg));
+        editBtn.addEventListener('click', () => {
+          const bubbles = Array.from(this.container.querySelectorAll('.engram-msg-wrapper'));
+          const idx = bubbles.indexOf(wrapper);
+          if (idx !== -1) {
+            this.onEditMessage(idx);
+          }
+        });
+      }
+
+      if (msg.role === 'assistant') {
+        const regenBtn = actions.appendChild(document.createElement('button'));
+        regenBtn.className = 'engram-msg-action-btn';
+        regenBtn.title = 'Regenerate response';
+        setIcon(regenBtn, 'refresh-cw');
+        regenBtn.addEventListener('click', () => {
+          const bubbles = Array.from(this.container.querySelectorAll('.engram-msg-wrapper'));
+          const idx = bubbles.indexOf(wrapper);
+          if (idx !== -1) {
+            this.onRegenerateMessage(idx);
+          }
+        });
       }
     }
 

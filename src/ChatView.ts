@@ -76,7 +76,8 @@ export class ChatView extends ItemView {
       this.messagesContainer,
       this,
       (content) => navigator.clipboard.writeText(content),
-      (msg) => this.editMessage(msg),
+      (idx) => this.editMessage(idx),
+      (idx) => this.regenerateMessage(idx),
       (path) => this.openNotes([path]),
       this.plugin.indexer
     );
@@ -518,12 +519,20 @@ export class ChatView extends ItemView {
     this.messageRenderer.appendBubble(userDisplayMsg);
     this.scrollToBottom();
 
+    await this.executeTurn(text, apiContent, userDisplayMsg);
+  }
+
+  private async executeTurn(
+    textForContext: string,
+    apiContent: string | MessageContentPart[],
+    userDisplayMsg: DisplayMessage
+  ): Promise<void> {
     try {
       this.showContextStatus('Building context…');
       let attachedNotesList: string[] = [];
       const enriched = await this.plugin.contextBuilder.prependSystemMessage(
         this.messages.slice(0, -1),
-        text || 'See attachment(s)',
+        textForContext || 'See attachment(s)',
         (s) => this.showContextStatus(s),
         (paths) => { attachedNotesList = paths; }
       );
@@ -591,14 +600,6 @@ export class ChatView extends ItemView {
       }
 
       // ── Critical: preserve full message history ──────────────────────────
-      // finalMessages is built from a TRUNCATED working set (maxRecentMessages).
-      // Replacing this.messages with it would permanently delete older messages
-      // from disk every turn. Instead, only append the NEW messages produced in
-      // this turn (assistant reply + any tool messages) to the full history.
-      //
-      // enriched = [system, ...truncated_history, user_msg]  (length = enriched.length)
-      // finalMessages = enriched + [assistant_msg, ...tool_msgs, ...]
-      // New turn messages = finalMessages.slice(enriched.length)
       const newTurnMessages = finalMessages
         .slice(enriched.length)
         .filter(m => m.role !== 'system');
@@ -607,7 +608,6 @@ export class ChatView extends ItemView {
       this.sessionManager.save(this.messages);
       this.updateTokenBar();
     } catch (e) {
-      // Catch errors from context building or any other step before streaming
       new Notice(`Error: ${(e as Error).message}`);
     } finally {
       this.setStreaming(false);
@@ -972,10 +972,10 @@ export class ChatView extends ItemView {
     }
   }
 
-  private editMessage(msg: DisplayMessage): void {
+  private editMessage(idx: number): void {
     if (this.isStreaming) return;
-    const idx = this.displayMessages.indexOf(msg);
-    if (idx === -1) return;
+    if (idx < 0 || idx >= this.displayMessages.length) return;
+    const msg = this.displayMessages[idx];
     let userCount = 0;
     for (let i = 0; i < idx; i++) {
       if (this.displayMessages[i].role === 'user') userCount++;
@@ -996,6 +996,50 @@ export class ChatView extends ItemView {
     if (msg.attachments) { this.pendingAttachments = [...msg.attachments]; this.renderAttachmentPreviews(); }
     this.renderMessages();
     this.sessionManager.save(this.messages);
+  }
+
+  private async regenerateMessage(idx: number): Promise<void> {
+    if (this.isStreaming) return;
+    if (idx < 0 || idx >= this.displayMessages.length) return;
+
+    let userCount = 0;
+    for (let i = 0; i < idx; i++) {
+      if (this.displayMessages[i].role === 'user') userCount++;
+    }
+    let mIdx = -1, mUserCount = 0;
+    for (let i = 0; i < this.messages.length; i++) {
+      if (this.messages[i].role === 'user') {
+        if (mUserCount === userCount - 1) { mIdx = i; break; }
+        mUserCount++;
+      }
+    }
+    if (mIdx === -1) return;
+
+    const userMsg = this.messages[mIdx];
+    const userDisplayMsg = this.displayMessages[idx - 1];
+
+    this.messages = this.messages.slice(0, mIdx + 1);
+    this.displayMessages = this.displayMessages.slice(0, idx);
+
+    this.sessionManager.save(this.messages);
+    this.renderMessages();
+
+    this.setStreaming(true);
+
+    let text = '';
+    let apiContent: string | MessageContentPart[] = '';
+    if (typeof userMsg.content === 'string') {
+      text = userMsg.content;
+      apiContent = userMsg.content;
+    } else if (Array.isArray(userMsg.content)) {
+      text = userMsg.content
+        .filter(p => p && p.type === 'text' && typeof p.text === 'string')
+        .map(p => p.text as string)
+        .join('\n');
+      apiContent = userMsg.content;
+    }
+
+    await this.executeTurn(text, apiContent, userDisplayMsg);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
